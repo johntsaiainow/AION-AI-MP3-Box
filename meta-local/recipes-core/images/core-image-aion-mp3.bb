@@ -37,3 +37,43 @@ ROOTFS_POSTPROCESS_COMMAND:append = " aion_mp3_autologin; "
 
 # Google AIY Voice HAT V1 playback and capture utilities
 IMAGE_INSTALL:append = " alsa-utils-aplay"
+
+# AION Python Music Player Runtime
+IMAGE_INSTALL:append = " python3-core python3-misc python3-mutagen mpv coreutils"
+
+# AION v0.3.0: generate an ext4 root filesystem
+# Keep existing image formats available.
+IMAGE_FSTYPES += " ext4"
+
+# Mount the dedicated music partition at boot.
+aion_music_mount() {
+    install -d "${IMAGE_ROOTFS}/mnt/music"
+    install -d "${IMAGE_ROOTFS}/boot"
+
+    if ! grep -qE '^[^#]*[[:space:]]/boot[[:space:]]' "${IMAGE_ROOTFS}${sysconfdir}/fstab"; then
+        printf '%s\n' '/dev/mmcblk0p1 /boot vfat defaults 0 0' \
+            >> "${IMAGE_ROOTFS}${sysconfdir}/fstab"
+    fi
+
+    if ! grep -q 'LABEL=AION-MUSIC' "${IMAGE_ROOTFS}${sysconfdir}/fstab"; then
+        printf '%s\n' \
+            'LABEL=AION-MUSIC /mnt/music ext4 defaults,nofail 0 2' \
+            >> "${IMAGE_ROOTFS}${sysconfdir}/fstab"
+    fi
+}
+
+ROOTFS_POSTPROCESS_COMMAND:append = " aion_music_mount; "
+
+# AION UTF-8 login shell environment.
+# The base image already installs /etc/locale.conf.
+aion_install_utf8_profile() {
+    install -d "${IMAGE_ROOTFS}${sysconfdir}/profile.d"
+
+    echo 'export LANG=C.UTF-8' \
+        > "${IMAGE_ROOTFS}${sysconfdir}/profile.d/aion-locale.sh"
+
+    chmod 0644 \
+        "${IMAGE_ROOTFS}${sysconfdir}/profile.d/aion-locale.sh"
+}
+
+ROOTFS_POSTPROCESS_COMMAND:append = " aion_install_utf8_profile; "
