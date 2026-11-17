@@ -34,3 +34,6 @@ UNIT
 }
 
 ROOTFS_POSTPROCESS_COMMAND:append = " aion_mp3_autologin; "
+
+# Google AIY Voice HAT V1 playback and capture utilities
+IMAGE_INSTALL:append = " alsa-utils-aplay"
