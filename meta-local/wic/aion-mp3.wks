@@ -1,13 +1,7 @@
-# short-description: AION AI MP3 Box SD image
-# long-description: Raspberry Pi Boot, Yocto RootFS,
-# and a dedicated AION-MUSIC ext4 partition.
-#
-# The music partition is initially small.
-# Expand it only during a controlled deployment.
-# Existing music data is NOT included.
+# short-description: AION AI MP3 Box two-partition image
+# long-description: Raspberry Pi Boot and Yocto RootFS.
+# Music storage is configured separately by the user.
 
 part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 128
 
 part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label root --align 4096
-
-part /mnt/music --ondisk mmcblk0 --fstype=ext4 --label AION-MUSIC --align 4096 --size 64

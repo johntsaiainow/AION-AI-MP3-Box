@@ -1,0 +1,464 @@
+=== T085-DD-3 RELEASE CANDIDATE AUDIT ===
+
+=== 1. FLASH SCRIPT ===
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+DEVICE=/dev/mmcblk0
+P1=/dev/mmcblk0p1
+P2=/dev/mmcblk0p2
+P3=/dev/mmcblk0p3
+
+IMAGE="$HOME/Projects/Yocto-RPi3-Scarthgap/build/tmp/deploy/images/raspberrypi3-64/core-image-aion-mp3-raspberrypi3-64.rootfs.ext4"
+BACKUP="$HOME/Projects/AION-AI-MP3-Box/backups/20261117-144643"
+
+EXPECTED_P2_SIZE=790626304
+EXPECTED_IMAGE_SIZE=725614592
+EXPECTED_P3_UUID=da792082-ddb1-4896-b6fd-0a61a0cc7266
+
+echo "=== AION v0.4.0 SAFE P2 FLASH ==="
+
+# Validate device identity
+[[ -b "$DEVICE" && -b "$P1" && -b "$P2" && -b "$P3" ]]
+
+[[ "$(lsblk -bdno SIZE "$P2" | tr -d '[:space:]')" == "$EXPECTED_P2_SIZE" ]]
+[[ "$(sudo blkid -s UUID -o value "$P3")" == "$EXPECTED_P3_UUID" ]]
+[[ "$(sudo blkid -s LABEL -o value "$P3")" == "AION-MUSIC" ]]
+
+# Verify partition table identity and boundaries
+sudo sfdisk --dump "$DEVICE" |
+    grep -q '^label-id: 0x076c4a2a$'
+
+sudo sfdisk --dump "$DEVICE" |
+    grep -Eq '^/dev/mmcblk0p2 : start= *278528, size= *1544192, type=83$'
+
+# Verify image
+[[ -f "$IMAGE" ]]
+[[ "$(stat -Lc %s "$IMAGE")" == "$EXPECTED_IMAGE_SIZE" ]]
+
+# Verify backups
+(
+    cd "$BACKUP"
+    sha256sum -c SHA256SUMS
+)
+
+# Do not write to mounted partitions
+for PART in "$P1" "$P2" "$P3"; do
+    if findmnt -rn -S "$PART" >/dev/null; then
+        echo "ERROR: $PART is mounted"
+        exit 1
+    fi
+done
+
+echo
+echo "=== VERIFY IMAGE FILESYSTEM ==="
+e2fsck -fn "$IMAGE"
+
+echo
+echo "=== TARGET ==="
+lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS "$DEVICE"
+
+echo
+echo "WARNING: The existing P2 RootFS will be replaced."
+echo "P1 Boot and P3 Music will not be written."
+
+read -r -p 'Type FLASH-AION-P2 to continue: ' CONFIRM
+[[ "$CONFIRM" == "FLASH-AION-P2" ]] || exit 1
+
+echo
+echo "=== FLASH P2 ONLY ==="
+sudo dd if="$IMAGE" of="$P2" \
+    bs=4M status=progress conv=fsync
+
+sync
+
+echo
+echo "=== CHECK NEW ROOTFS ==="
+sudo e2fsck -fy "$P2"
+
+echo
+echo "=== EXPAND ROOTFS ==="
+sudo resize2fs "$P2"
+
+echo
+echo "=== FINAL CHECK ==="
+sudo e2fsck -fy "$P2"
+
+echo
+echo "=== VERIFY MUSIC PARTITION ==="
+sudo blkid "$P3"
+
+echo
+echo "AION v0.4.0 P2 FLASH COMPLETE"
+
+=== 2. BACKUP SCRIPT ===
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+DEVICE=/dev/mmcblk0
+P1=/dev/mmcblk0p1
+P2=/dev/mmcblk0p2
+P3=/dev/mmcblk0p3
+
+BACKUP="$HOME/Projects/AION-AI-MP3-Box/backups/$(date +%Y%m%d-%H%M%S)"
+
+trap 'echo "ERROR: Backup failed at line $LINENO" >&2' ERR
+
+echo "=== AION SD CARD BACKUP ==="
+
+test -b "$DEVICE"
+test -b "$P1"
+test -b "$P2"
+test -b "$P3"
+
+SIZE=$(lsblk -bdno SIZE "$P2" | tr -d '[:space:]')
+LABEL=$(sudo blkid -s LABEL -o value "$P3")
+UUID=$(sudo blkid -s UUID -o value "$P3")
+
+echo "P2 size: $SIZE"
+echo "P3 label: $LABEL"
+echo "P3 UUID: $UUID"
+
+[[ "$SIZE" == "790626304" ]] || {
+    echo "ERROR: Unexpected P2 size"
+    exit 1
+}
+
+[[ "$LABEL" == "AION-MUSIC" ]] || {
+    echo "ERROR: Unexpected P3 label"
+    exit 1
+}
+
+[[ "$UUID" == "da792082-ddb1-4896-b6fd-0a61a0cc7266" ]] || {
+    echo "ERROR: Unexpected P3 UUID"
+    exit 1
+}
+
+mkdir -p "$BACKUP"
+
+echo
+echo "=== BACKUP PARTITION TABLE ==="
+sudo sfdisk --dump "$DEVICE" > "$BACKUP/partition-table.sfdisk"
+
+echo
+echo "=== BACKUP BOOT PARTITION ==="
+sudo dd if="$P1" of="$BACKUP/aion-boot-p1.img" \
+    bs=4M status=progress conv=fsync
+
+echo
+echo "=== BACKUP ROOTFS PARTITION ==="
+sudo dd if="$P2" of="$BACKUP/aion-rootfs-p2-before-v030.img" \
+    bs=4M status=progress conv=fsync
+
+echo
+echo "=== VERIFY BACKUPS ==="
+(
+    cd "$BACKUP"
+    sha256sum aion-boot-p1.img aion-rootfs-p2-before-v030.img > SHA256SUMS
+    sha256sum -c SHA256SUMS
+)
+
+echo
+echo "BACKUP COMPLETE: $BACKUP"
+
+=== 3. BOOTSTRAP ===
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCES="$ROOT/sources"
+
+source "$ROOT/config/sources.lock"
+
+mkdir -p "$SOURCES"
+
+checkout_layer() {
+    local name="$1"
+    local url="$2"
+    local revision="$3"
+    local directory="$SOURCES/$name"
+
+    echo "=== $name ==="
+
+    if [[ ! -d "$directory/.git" ]]; then
+        git clone "$url" "$directory"
+    fi
+
+    git -C "$directory" fetch origin "$revision"
+    git -C "$directory" checkout --detach "$revision"
+
+    test "$(git -C "$directory" rev-parse HEAD)" = "$revision"
+}
+
+checkout_layer poky "$POKY_URL" "$POKY_REV"
+checkout_layer meta-raspberrypi "$RPI_URL" "$RPI_REV"
+checkout_layer meta-openembedded "$OE_URL" "$OE_REV"
+
+echo
+echo "=== AION YOCTO SOURCES READY ==="
+
+=== 4. BUILD SCRIPT ===
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+POKY="$ROOT/sources/poky"
+OE="$ROOT/sources/meta-openembedded"
+RPI="$ROOT/sources/meta-raspberrypi"
+BUILD="$ROOT/build"
+
+if [[ ! -f "$POKY/oe-init-build-env" ]]; then
+    echo "ERROR: Yocto sources missing."
+    echo "Run ./bootstrap.sh first."
+    exit 1
+fi
+
+for layer in \
+    "$POKY/meta" \
+    "$POKY/meta-poky" \
+    "$POKY/meta-yocto-bsp" \
+    "$RPI" \
+    "$OE/meta-oe" \
+    "$OE/meta-python" \
+    "$OE/meta-networking" \
+    "$ROOT/meta-local"
+do
+    test -f "$layer/conf/layer.conf" || {
+        echo "ERROR: Missing layer: $layer"
+        exit 1
+    }
+done
+
+mkdir -p "$BUILD/conf"
+
+if [[ ! -f "$BUILD/conf/bblayers.conf" ]]; then
+cat > "$BUILD/conf/bblayers.conf" <<LAYERS
+POKY_BBLAYERS_CONF_VERSION = "2"
+BBPATH = "\${TOPDIR}"
+BBFILES ?= ""
+
+BBLAYERS ?= " \\
+    $POKY/meta \\
+    $POKY/meta-poky \\
+    $POKY/meta-yocto-bsp \\
+    $RPI \\
+    $OE/meta-oe \\
+    $OE/meta-python \\
+    $OE/meta-networking \\
+    $ROOT/meta-local \\
+"
+LAYERS
+fi
+
+if [[ ! -f "$BUILD/conf/local.conf" ]]; then
+cat > "$BUILD/conf/local.conf" <<'CONFIG'
+MACHINE = "raspberrypi3-64"
+DISTRO = "poky"
+INIT_MANAGER = "systemd"
+
+PACKAGE_CLASSES = "package_rpm"
+
+EXTRA_IMAGE_FEATURES = "debug-tweaks"
+
+IMAGE_FSTYPES:append = " wic.bz2"
+
+LICENSE_FLAGS_ACCEPTED:append = " synaptics-killswitch commercial"
+
+BB_NUMBER_THREADS = "4"
+CONFIG
+fi
+
+echo "=== AION STANDALONE BUILD ==="
+
+cd "$ROOT"
+
+# Yocto initialization defines bitbake and required environment variables.
+# Yocto initialization expects some optional shell variables to be unset.
+set +u
+source "$POKY/oe-init-build-env" "$BUILD"
+set -u
+
+MODE="${1:-rootfs}"
+
+case "$MODE" in
+    rootfs)
+        echo "=== Building and deploying AION ext4 RootFS ==="
+
+        ROOTFS_CONFIG="$(mktemp /tmp/aion-rootfs-XXXXXXXX.conf)"
+        trap 'rm -f "$ROOTFS_CONFIG"' EXIT
+
+        cat > "$ROOTFS_CONFIG" <<'ROOTFS'
+IMAGE_FSTYPES = "ext4"
+IMAGE_FSTYPES:remove = "wic wic.bz2 wic.bmap ext3 tar.bz2"
+ROOTFS
+
+        bitbake -R "$ROOTFS_CONFIG" core-image-aion-mp3
+        ;;
+    full)
+        echo "=== Building AION full image ==="
+        bitbake core-image-aion-mp3
+        ;;
+    *)
+        echo "Usage: $0 [rootfs|full]" >&2
+        exit 2
+        ;;
+esac
+
+=== 5. SOURCE LOCK ===
+POKY_URL=https://git.yoctoproject.org/poky
+POKY_REV=6b7c1066f778db5a6b3e35400617b10342988fa8
+
+RPI_URL=https://git.yoctoproject.org/meta-raspberrypi
+RPI_REV=018d44467c4f09eb63f8ea5e86e85d755250cf89
+
+OE_URL=https://git.openembedded.org/meta-openembedded
+OE_REV=2db6aece32c7f8ebf6015b468e1b4e21de072e3b
+
+=== 6. NETWORKMANAGER ===
+# AION AI MP3 Box
+# Enable the terminal-based NetworkManager interface.
+
+PACKAGECONFIG:append = " nmtui"
+
+=== 7. IMAGE RECIPE ===
+SUMMARY = "AION AI MP3 Box Embedded Linux"
+DESCRIPTION = "AION Raspberry Pi 3 with automatic local console login"
+
+require core-image-aion.bb
+
+aion_mp3_autologin() {
+    SYSTEMD_DIR="${IMAGE_ROOTFS}${sysconfdir}/systemd/system"
+    DROPIN_DIR="$SYSTEMD_DIR/kmsconvt@tty1.service.d"
+
+    install -d "$DROPIN_DIR"
+
+    cat > "$DROPIN_DIR/10-autologin.conf" <<'UNIT'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/kmscon --vt=tty1 --seats=seat0 --no-switchvt --login -- /sbin/agetty --autologin root --noclear -- -
+UNIT
+
+    # Keep tty2 as the password-protected recovery console.
+    # Enable a dedicated tty2 recovery console.
+    GETTY_DIR="$SYSTEMD_DIR/getty.target.wants"
+    GETTY_UNIT="${IMAGE_ROOTFS}${systemd_system_unitdir}/getty@.service"
+
+    test -f "$GETTY_UNIT" ||
+        bbfatal "AION MP3: getty@.service is missing"
+
+    install -d "$GETTY_DIR"
+
+    ln -sfn "${systemd_system_unitdir}/getty@.service"         "$GETTY_DIR/getty@tty2.service"
+
+    test -L "$GETTY_DIR/getty@tty2.service" ||
+        bbfatal "AION MP3: failed to enable tty2 recovery console"
+
+    bbnote "AION MP3: tty1 automatic root login configured"
+}
+
+ROOTFS_POSTPROCESS_COMMAND:append = " aion_mp3_autologin; "
+
+# Google AIY Voice HAT V1 playback and capture utilities
+IMAGE_INSTALL:append = " alsa-utils-aplay"
+
+# AION Python Music Player Runtime
+IMAGE_INSTALL:append = " python3-core python3-misc python3-mutagen mpv coreutils"
+
+# AION v0.3.0: generate an ext4 root filesystem
+# Keep existing image formats available.
+IMAGE_FSTYPES += " ext4"
+
+# Mount the dedicated music partition at boot.
+aion_music_mount() {
+    install -d "${IMAGE_ROOTFS}/mnt/music"
+    install -d "${IMAGE_ROOTFS}/boot"
+
+    if ! grep -qE '^[^#]*[[:space:]]/boot[[:space:]]' "${IMAGE_ROOTFS}${sysconfdir}/fstab"; then
+        printf '%s\n' '/dev/mmcblk0p1 /boot vfat defaults 0 0' \
+            >> "${IMAGE_ROOTFS}${sysconfdir}/fstab"
+    fi
+
+    if ! grep -q 'LABEL=AION-MUSIC' "${IMAGE_ROOTFS}${sysconfdir}/fstab"; then
+        printf '%s\n' \
+            'LABEL=AION-MUSIC /mnt/music ext4 defaults,nofail 0 2' \
+            >> "${IMAGE_ROOTFS}${sysconfdir}/fstab"
+    fi
+}
+
+ROOTFS_POSTPROCESS_COMMAND:append = " aion_music_mount; "
+
+# AION UTF-8 login shell environment.
+# The base image already installs /etc/locale.conf.
+aion_install_utf8_profile() {
+    install -d "${IMAGE_ROOTFS}${sysconfdir}/profile.d"
+
+    echo 'export LANG=C.UTF-8' \
+        > "${IMAGE_ROOTFS}${sysconfdir}/profile.d/aion-locale.sh"
+
+    chmod 0644 \
+        "${IMAGE_ROOTFS}${sysconfdir}/profile.d/aion-locale.sh"
+}
+
+ROOTFS_POSTPROCESS_COMMAND:append = " aion_install_utf8_profile; "
+
+# AION v0.4.0 Bluetooth Audio (A2DP Source)
+# Preserve existing MPV / ALSA / Google AIY Voice HAT.
+IMAGE_INSTALL:append = " \
+    pulseaudio-server \
+    pulseaudio \
+    pulseaudio-misc \
+    pulseaudio-module-bluetooth-discover \
+    pulseaudio-module-bluetooth-policy \
+    pulseaudio-module-bluez5-discover \
+    pulseaudio-module-bluez5-device \
+    pulseaudio-module-loopback \
+    pulseaudio-module-native-protocol-unix \
+    pulseaudio-module-alsa-sink \
+    pulseaudio-module-alsa-source \
+    pulseaudio-module-udev-detect \
+    pulseaudio-module-always-sink \
+    pulseaudio-module-device-restore \
+    pulseaudio-module-stream-restore \
+    pulseaudio-module-card-restore \
+    pulseaudio-module-default-device-restore \
+    pulseaudio-module-switch-on-connect \
+"
+
+
+# AION v0.4.0 — Headless PulseAudio service
+IMAGE_INSTALL:append = " aion-audio"
+
+# AION T085 WIC Bluetooth Overlay
+# Install the custom DTBO in the Raspberry Pi FAT boot partition.
+IMAGE_BOOT_FILES:append = " aion-bt-460800.dtbo;overlays/aion-bt-460800.dtbo"
+
+# Ensure the custom overlay is deployed before WIC image creation.
+do_image_wic[depends] += " aion-bt-overlay:do_deploy"
+
+IMAGE_INSTALL:append = " aion-player"
+
+=== 8. STAGED FILE SUMMARY ===
+ .gitignore                                         |  19 ++++
+ bootstrap.sh                                       |  34 +++++++
+ build.sh                                           | 105 +++++++++++++++++++++
+ config/sources.lock                                |   8 ++
+ .../recipes-aion/aion-audio/aion-audio_0.1.bb      |  50 ++++++++++
+ .../aion-audio/files/aion-bt-reconnect.service     |  13 +++
+ .../aion-audio/files/aion-bt-reconnect.sh          |  44 +++++++++
+ .../aion-audio/files/aion-pulseaudio.service       |  32 +++++++
+ .../recipes-aion/aion-player/aion-player_1.0.bb    |  23 +++++
+ .../aion-player/files/aion-player.service          |  17 ++++
+ .../aion-bt-overlay/aion-bt-overlay_1.0.bb         |  28 ++++++
+ .../aion-bt-overlay/files/aion-bt-460800.dts       |  14 +++
+ .../recipes-bsp/bootfiles/rpi-config_git.bbappend  |   4 +
+ .../networkmanager/networkmanager_%.bbappend       |   4 +
+ .../recipes-core/images/core-image-aion-mp3.bb     |  36 +++++++
+ meta-local/recipes-multimedia/mpv/mpv_%.bbappend   |   4 +
+ meta-local/wic/aion-mp3.wks                        |  13 +++
+ scripts/backup-aion-sd.sh                          |  68 +++++++++++++
+ scripts/flash-aion-p2.sh                           |  89 +++++++++++++++++
+ 19 files changed, 605 insertions(+)
+
+=== 9. UNEXPECTED LARGE FILES ===
+
+=== T085-DD-3 COMPLETE ===

@@ -1,12 +1,9 @@
-# AION AI MP3 Box
+# AION Music and Internet Radio Box
 
-AION AI MP3 Box is a Yocto-based headless music player built around a
+AION Music and Internet Radio Box is a Yocto-based headless music player built around a
 Raspberry Pi 3 and the Google AIY Voice HAT V1. The current interface
 provides local music playback, playlists, internet radio, network/cloud
-music, Bluetooth, Wi-Fi, storage, and system management. AI, Vosk, Piper,
-voice capture, and voice synthesis features have been removed from the
-current music-only product.
-
+music, Bluetooth, Wi-Fi, storage, and system management.
 ## Current development status
 
 - **Platform** — Raspberry Pi 3 Model B (ARM64), Yocto Scarthgap 5.0 LTS,

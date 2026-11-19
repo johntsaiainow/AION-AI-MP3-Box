@@ -76,7 +76,8 @@ aion_configure_console() {
 }
 
 
-# Final console enforcement before WIC image creation.
+# Apply the final console configuration after systemd presets and before
+# any filesystem image is generated.
 aion_finalize_console() {
     SYSTEMD_DIR="${IMAGE_ROOTFS}${sysconfdir}/systemd/system"
     GETTY_WANTS="$SYSTEMD_DIR/getty.target.wants"
@@ -117,4 +118,4 @@ aion_finalize_console() {
     bbnote "AION: tty1 kmscon / tty2 getty configuration verified"
 }
 
-do_image_wic[prefuncs] += "aion_finalize_console"
+do_image[postfuncs] += "aion_finalize_console"

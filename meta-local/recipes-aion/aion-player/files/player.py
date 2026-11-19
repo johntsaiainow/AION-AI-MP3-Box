@@ -457,13 +457,9 @@ def playback_controls(process, socket_path, env):
             except subprocess.TimeoutExpired:
                 capture.kill()
                 capture.wait()
-        set_audio_busy(False)
 
 
 def play(tracks, *, shuffle=False, repeat=False, station=None):
-    from aion_voice import set_audio_busy
-    set_audio_busy(True)
-
     tracks = list(tracks)
     if not tracks:
         print(tr('No playable tracks.', '沒有可播放的曲目。'))

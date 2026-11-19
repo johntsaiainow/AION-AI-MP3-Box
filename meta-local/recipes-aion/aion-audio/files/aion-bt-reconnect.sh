@@ -7,6 +7,32 @@ DELAY=10
 
 echo "AION Bluetooth Auto-Reconnect starting"
 
+controller_available() {
+    bluetoothctl --timeout 3 list | grep -q '^Controller '
+}
+
+if ! controller_available; then
+    # The Broadcom UART can register hci0 but fail initialization at boot.
+    driver=/sys/bus/serial/drivers/hci_uart_bcm
+    set -- "$driver"/serial*
+    if [ "$#" -eq 1 ] && [ -L "$1" ]; then
+        device=${1##*/}
+        echo "AION: Retrying Broadcom Bluetooth controller initialization"
+        printf '%s' "$device" > "$driver/unbind"
+        printf '%s' "$device" > "$driver/bind"
+        for delay in 1 2 3 4 5 6; do
+            if controller_available; then
+                break
+            fi
+            sleep 2
+        done
+    fi
+    if ! controller_available; then
+        echo "AION: No Bluetooth controller available" >&2
+        exit 1
+    fi
+fi
+
 attempt=1
 
 while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do

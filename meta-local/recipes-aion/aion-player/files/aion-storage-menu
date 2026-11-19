@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""AION Storage Management v0.4.0: optional P3, explicit destructive operations."""
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from aion_ui import options, screen, selection, tr, use_saved_language
+
+DISK = '/dev/mmcblk0'
+P1, P2, P3 = (f'{DISK}p{i}' for i in (1, 2, 3))
+MOUNT = Path('/mnt/music')
+LABEL = 'AION-MUSIC'
+FSTAB = Path('/etc/fstab')
+# UUID-based fstab entry is assembled in configure() after verifying P3.
+
+
+def cmd(*args, check=True, input_text=None):
+    p = subprocess.run(args, input=input_text, text=True, capture_output=True)
+    if check and p.returncode:
+        raise RuntimeError((p.stderr or p.stdout).strip() or f'{args[0]} failed ({p.returncode})')
+    return p.stdout.strip()
+
+
+def exists(path):
+    return Path(path).exists()
+
+
+def mounted():
+    return subprocess.run(['mountpoint', '-q', str(MOUNT)]).returncode == 0
+
+
+def p3_info():
+    if not exists(P3):
+        return None
+    return {'label': cmd('blkid', '-s', 'LABEL', '-o', 'value', P3, check=False),
+            'type': cmd('blkid', '-s', 'TYPE', '-o', 'value', P3, check=False),
+            'uuid': cmd('blkid', '-s', 'UUID', '-o', 'value', P3, check=False)}
+
+
+def require_p3():
+    info = p3_info()
+    if not info or info['label'] != LABEL or info['type'] != 'ext4':
+        raise RuntimeError(tr('P3 is missing or is not the AION-MUSIC ext4 partition. No changes made.', '找不到標示為 AION-MUSIC 的 ext4 P3 分割區。未執行變更。'))
+    return info
+
+
+def confirm(phrase):
+    print(tr('Type {phrase} to confirm: ', '輸入 {phrase} 確認：').format(phrase=phrase), end='', flush=True)
+    return input().strip() == phrase
+
+
+def show():
+    screen(tr('Storage devices', '儲存裝置'))
+    print(cmd('lsblk', '-o', 'NAME,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS', DISK))
+    screen(tr('Music mount', '音樂掛載點'))
+    print(cmd('findmnt', '--mountpoint', str(MOUNT), check=False) or tr('Not mounted', '尚未掛載'))
+    screen(tr('Disk usage', '磁碟用量'))
+    print(cmd('df', '-h', str(MOUNT) if mounted() else '/'))
+
+
+def require_mounted_p3():
+    """Never operate on /mnt/music unless its source is the expected P3."""
+    require_p3()
+    if MOUNT.is_symlink() or not MOUNT.is_dir() or not mounted():
+        raise RuntimeError(tr('/mnt/music is not a valid mounted directory.', '/mnt/music 不是有效的掛載目錄。'))
+    source = cmd('findmnt', '-nro', 'SOURCE', '--target', str(MOUNT))
+    if os.path.realpath(source.split('[')[0]) != os.path.realpath(P3):
+        raise RuntimeError(tr('/mnt/music is mounted from {source}, not {expected}. Operation refused.', '/mnt/music 的來源為 {source}，預期是 {expected}。已停止操作。').format(source=source, expected=P3))
+
+
+def mount_music():
+    require_p3()
+    if MOUNT.is_symlink():
+        raise RuntimeError(tr('/mnt/music is a symlink; refusing to mount.', '/mnt/music 是符號連結。已停止掛載。'))
+    MOUNT.mkdir(parents=True, exist_ok=True)
+    if mounted():
+        require_mounted_p3()
+        print(tr('Already mounted:', '已掛載：'), MOUNT)
+        return
+    if any(MOUNT.iterdir()):
+        raise RuntimeError(tr('/mnt/music contains files while unmounted; inspect before mounting.', '未掛載的 /mnt/music 中已有檔案。請先檢查。'))
+    # Use explicit device after checking label, avoiding a different device with same label.
+    cmd('mount', '-t', 'ext4', P3, str(MOUNT))
+    require_mounted_p3()
+    print(tr('Mounted:', '掛載完成：'), cmd('findmnt', str(MOUNT)))
+
+
+def unmount_music():
+    if not mounted():
+        print(tr('Music partition is not mounted.', '音樂分割區尚未掛載。'))
+        return
+    require_mounted_p3()
+    cmd('umount', str(MOUNT))
+    print(tr('Unmounted:', '已卸載：'), MOUNT)
+
+
+def configure():
+    info = require_p3()
+    if not re.fullmatch(r'[0-9a-fA-F-]{36}', info['uuid']):
+        raise RuntimeError(tr('P3 has no valid ext4 UUID.', 'P3 沒有有效的 ext4 UUID。'))
+    if MOUNT.is_symlink():
+        raise RuntimeError(tr('/mnt/music is a symlink.', '/mnt/music 是符號連結。'))
+    MOUNT.mkdir(parents=True, exist_ok=True)
+    entry = f"UUID={info['uuid']} /mnt/music ext4 nofail,x-systemd.device-timeout=5s 0 2"
+    lines = FSTAB.read_text().splitlines() if FSTAB.exists() else []
+    for line in lines:
+        fields = line.split()
+        if fields and not line.lstrip().startswith('#') and len(fields) >= 2 and fields[1] == str(MOUNT):
+            if fields[0] not in (f'LABEL={LABEL}', f"UUID={info['uuid']}"):
+                raise RuntimeError(tr('Conflicting /mnt/music fstab entry. No changes made.', 'fstab 中的 /mnt/music 項目有衝突。未執行變更。'))
+    lines = [line for line in lines if not (len(line.split()) >= 2 and not line.lstrip().startswith('#') and line.split()[1] == str(MOUNT))]
+    lines.append(entry)
+    if FSTAB.exists():
+        shutil.copy2(FSTAB, '/etc/fstab.aion-backup')
+    temp = FSTAB.with_name('fstab.aion-new')
+    temp.write_text('\n'.join(lines) + '\n')
+    temp.replace(FSTAB)
+    print(tr('Optional UUID-based auto-mount configured. Existing fstab backed up.', '已依 UUID 設定自動掛載，並備份原有 fstab。'))
+
+
+def check_filesystem():
+    require_p3()
+    if mounted() or cmd('findmnt', '-n', '-S', P3, check=False):
+        raise RuntimeError(tr('Unmount P3 before checking filesystem.', '檢查檔案系統前請先卸載 P3。'))
+    p = subprocess.run(['e2fsck', '-fn', P3])
+    print(tr('e2fsck exit status:', 'e2fsck 結束狀態：'), p.returncode, tr('(read-only check; no repairs performed)', '（唯讀檢查，未執行修復）'))
+
+
+def disk_guard():
+    # Restrict all partition-table operations to the explicitly expected device.
+    if not exists(DISK) or not exists(P1) or not exists(P2):
+        raise RuntimeError(tr('Expected SD disk/P1/P2 missing.', '找不到預期的 SD 卡或 P1/P2。'))
+    root_source = cmd('findmnt', '-nro', 'SOURCE', '/')
+    root_device = os.path.realpath(root_source.split('[')[0])
+    if root_device not in (P2, '/dev/root'):
+        raise RuntimeError(tr('Unexpected root device. Partition changes refused.', '根裝置不符。已停止變更分割區。'))
+    if not exists('/sys/class/block/mmcblk0'):
+        raise RuntimeError(tr('Target is not the expected MMC device.', '目標與預期的 MMC 裝置不符。'))
+    if cmd('lsblk', '-nro', 'TYPE', P1) != 'part' or cmd('lsblk', '-nro', 'TYPE', P2) != 'part':
+        raise RuntimeError(tr('Unexpected partition layout.', '分割區配置不符。'))
+    if mounted():
+        raise RuntimeError(tr('Unmount /mnt/music first.', '請先卸載 /mnt/music。'))
+
+
+def clear_library():
+    require_mounted_p3()
+    if os.path.realpath(MOUNT) == '/':
+        raise RuntimeError(tr('Invalid mount target.', '掛載目標無效。'))
+    print(tr('DANGER: Delete music library content on', '危險：將刪除下列分割區的音樂庫內容'), P3)
+    print(tr('Keeps the partition and lost+found. Also preserves legacy player.py.', '會保留分割區、lost+found 和舊版 player.py。'))
+    if not confirm('CLEAR-AION-MUSIC'):
+        print(tr('Cancelled.', '已取消。')); return
+    for item in MOUNT.iterdir():
+        if item.name in ('lost+found', 'player.py'):
+            continue
+        if item.is_symlink() or item.is_file():
+            item.unlink()
+        elif item.is_dir():
+            shutil.rmtree(item)
+    print(tr('Music library cleared. Partition retained.', '已清空音樂庫並保留分割區。'))
+
+
+def delete_partition():
+    disk_guard()
+    require_p3()
+    if cmd('findmnt', '-n', '-S', P3, check=False):
+        raise RuntimeError(tr('P3 is mounted elsewhere.', 'P3 已掛載於其他位置。'))
+    print(tr('DANGER: Delete P3 partition table entry. Data may become inaccessible.', '危險：將刪除 P3 分割表項目。資料可能無法存取。'))
+    print(cmd('lsblk', '-o', 'NAME,SIZE,FSTYPE,LABEL,UUID', DISK))
+    if not confirm('DELETE-AION-P3'):
+        print(tr('Cancelled.', '已取消。')); return
+    cmd('sfdisk', '--delete', DISK, '3')
+    print(tr('P3 partition entry deleted. Reboot may be needed for kernel to refresh.', '已刪除 P3 分割表項目。可能需要重新開機才能更新。'))
+
+
+def format_partition():
+    disk_guard()
+    if not exists(P3):
+        raise RuntimeError(tr('P3 does not exist.', 'P3 不存在。'))
+    info = p3_info()
+    if info['type'] not in ('', 'ext4') or info['label'] not in ('', LABEL):
+        raise RuntimeError(tr('P3 contains an unexpected filesystem or label. Refusing to format.', 'P3 的檔案系統或標籤不符。已停止格式化。'))
+    if cmd('findmnt', '-n', '-S', P3, check=False):
+        raise RuntimeError(tr('P3 is mounted elsewhere.', 'P3 已掛載於其他位置。'))
+    print(tr('DANGER: Permanently replace filesystem on P3:', '危險：將永久覆寫 P3 的檔案系統：'), P3)
+    print(cmd('lsblk', '-o', 'NAME,SIZE,FSTYPE,LABEL,UUID', P3))
+    if not confirm('FORMAT-AION-P3'):
+        print(tr('Cancelled.', '已取消。')); return
+    cmd('mkfs.ext4', '-F', '-L', LABEL, P3)
+    print(tr('P3 formatted. Previous data is lost.', '已格式化 P3。舊資料已刪除。'))
+
+
+def create_partition():
+    disk_guard()
+    if exists(P3):
+        raise RuntimeError(tr('P3 already exists. Refusing to overwrite or resize it.', 'P3 已存在。已停止覆寫或調整大小。'))
+    table = cmd('sfdisk', '--dump', DISK)
+    if 'label: dos' not in table or not re.search(r'^' + re.escape(P2) + r'\s*:', table, re.M):
+        raise RuntimeError(tr('Expected DOS partition table/P2 missing.', '找不到預期的 DOS 分割表或 P2。'))
+    if len(re.findall(r'^/dev/mmcblk0p\d+\s*:', table, re.M)) != 2:
+        raise RuntimeError(tr('Unexpected partition layout; creation refused.', '分割區配置不符。已停止建立。'))
+    print(tr('Create new P3 from unallocated disk space (existing P1/P2 retained).', '使用未配置的磁碟空間建立 P3，並保留 P1/P2。'))
+    print(table)
+    if not confirm('CREATE-AION-P3'):
+        print(tr('Cancelled.', '已取消。')); return
+    # Only append a new partition; never rewrite the existing table wholesale.
+    cmd('sfdisk', '--append', DISK, input_text=',,83\n')
+    cmd('partprobe', DISK, check=False)
+    if not exists(P3):
+        print(tr('Partition created but kernel has not exposed P3. Reboot, then format explicitly.', '已建立分割區，但系統尚未辨識 P3。請重新開機後再格式化。'))
+        return
+    print(tr('P3 created. Use Format Music Partition to initialize it.', '已建立 P3。請用「格式化音樂分割區」初始化。'))
+
+
+def menu():
+    actions = {'1': show, '2': mount_music, '3': unmount_music,
+               '4': configure, '5': create_partition, '6': check_filesystem,
+               '10': clear_library, '11': delete_partition, '12': format_partition}
+    while True:
+        screen(tr('Storage management', '儲存裝置管理'))
+        options((
+            (1, tr('Show storage, partitions and usage', '顯示儲存裝置、分割區與用量')),
+            (2, tr('Mount music partition', '掛載音樂分割區')),
+            (3, tr('Unmount music partition', '卸載音樂分割區')),
+            (4, tr('Configure auto-mount', '設定自動掛載')),
+            (5, tr('Create music partition', '建立音樂分割區')),
+            (6, tr('Check filesystem (read-only)', '檢查檔案系統（唯讀）')),
+        ))
+        print('\n' + tr('Destructive operations', '危險操作'))
+        options((
+            (10, tr('Clear music library (keep P3)', '清空音樂庫（保留 P3）')),
+            (11, tr('Delete music partition (P3)', '刪除音樂分割區（P3）')),
+            (12, tr('Format music partition (P3)', '格式化音樂分割區（P3）')),
+            (0, tr('Back', '返回')),
+        ))
+        try:
+            choice = selection()
+            if choice == '0': return
+            if choice in actions:
+                actions[choice]()
+            else:
+                print(tr('Invalid selection.', '選項無效。'))
+        except (OSError, RuntimeError, EOFError, KeyboardInterrupt) as exc:
+            print(tr('ERROR:', '錯誤：'), exc)
+            if isinstance(exc, EOFError): return
+
+
+if __name__ == '__main__':
+    use_saved_language()
+    if os.geteuid() != 0:
+        sys.exit(tr('Storage management requires root privileges.', '儲存裝置管理需要 root 權限。'))
+    menu()

@@ -21,6 +21,7 @@ for layer in \
     "$OE/meta-oe" \
     "$OE/meta-python" \
     "$OE/meta-networking" \
+    "$OE/meta-filesystems" \
     "$ROOT/meta-local"
 do
     test -f "$layer/conf/layer.conf" || {
@@ -45,6 +46,7 @@ BBLAYERS ?= " \\
     $OE/meta-oe \\
     $OE/meta-python \\
     $OE/meta-networking \\
+    $OE/meta-filesystems \\
     $ROOT/meta-local \\
 "
 LAYERS
@@ -77,6 +79,10 @@ cd "$ROOT"
 set +u
 source "$POKY/oe-init-build-env" "$BUILD"
 set -u
+
+if ! grep -Fq 'meta-filesystems' "$BUILD/conf/bblayers.conf"; then
+    bitbake-layers add-layer "$OE/meta-filesystems"
+fi
 
 MODE="${1:-rootfs}"
 

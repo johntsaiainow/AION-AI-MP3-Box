@@ -1,0 +1,8 @@
+#!/bin/sh
+# AION Wi-Fi Management
+if ! command -v nmtui >/dev/null 2>&1; then
+    echo "ERROR: nmtui is not installed"
+    exit 1
+fi
+
+exec nmtui
