@@ -64,3 +64,22 @@ __pycache__/
 /meta-local/recipes-devtools/python/python3-mutagen_1.47.0.bb
 /meta-local/recipes-devtools/python/files/mutagen-1.47.0.tar.gz
 /meta-local/recipes-multimedia/mplayer/
+
+# Standalone Yocto source and build directories
+/sources/
+/build/
+
+# AION local backups and build logs
+/backups/
+/build-*.log
+/flash-aion-*.log
+
+# Accidental shell output files
+/cd
+/echo
+/set
+
+# Yocto development snapshots
+*.before-*
+*.pre-*
+*.t[0-9]*-backup

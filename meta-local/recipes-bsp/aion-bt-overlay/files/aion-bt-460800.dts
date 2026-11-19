@@ -1,0 +1,14 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2837";
+
+    fragment@0 {
+        target-path = "/soc/serial@7e201000/bluetooth";
+
+        __overlay__ {
+            max-speed = <460800>;
+        };
+    };
+};

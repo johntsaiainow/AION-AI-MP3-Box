@@ -77,3 +77,43 @@ aion_install_utf8_profile() {
 }
 
 ROOTFS_POSTPROCESS_COMMAND:append = " aion_install_utf8_profile; "
+
+# AION v0.4.0 Bluetooth Audio (A2DP Source)
+# Preserve existing MPV / ALSA / Google AIY Voice HAT.
+IMAGE_INSTALL:append = " \
+    pulseaudio-server \
+    pulseaudio \
+    pulseaudio-misc \
+    pulseaudio-module-bluetooth-discover \
+    pulseaudio-module-bluetooth-policy \
+    pulseaudio-module-bluez5-discover \
+    pulseaudio-module-bluez5-device \
+    pulseaudio-module-loopback \
+    pulseaudio-module-native-protocol-unix \
+    pulseaudio-module-alsa-sink \
+    pulseaudio-module-alsa-source \
+    pulseaudio-module-udev-detect \
+    pulseaudio-module-always-sink \
+    pulseaudio-module-device-restore \
+    pulseaudio-module-stream-restore \
+    pulseaudio-module-card-restore \
+    pulseaudio-module-default-device-restore \
+    pulseaudio-module-switch-on-connect \
+"
+
+
+# AION v0.4.0 — Headless PulseAudio service
+IMAGE_INSTALL:append = " aion-audio"
+
+# AION T085 WIC Bluetooth Overlay
+# Install the custom DTBO in the Raspberry Pi FAT boot partition.
+IMAGE_BOOT_FILES:append = " aion-bt-460800.dtbo;overlays/aion-bt-460800.dtbo"
+
+# Ensure the custom overlay is deployed before WIC image creation.
+do_image_wic[depends] += " aion-bt-overlay:do_deploy"
+
+IMAGE_INSTALL:append = " aion-player"
+
+# AION full SD image: Boot + RootFS + Music
+WKS_FILE = "aion-mp3.wks"
+WKS_SEARCH_PATH:prepend = "${THISDIR}/../../wic:"

@@ -1,24 +1,27 @@
 # AION AI MP3 Box
 
-AION AI MP3 Box is an experimental Yocto-based music player built by
-repurposing a Google AIY Voice Kit V1 with a Raspberry Pi 3. The project
-aims to combine local music playback with
-offline voice commands and spoken responses, with optional connections
-to AI services on the home network or in the cloud.
+AION AI MP3 Box is a Yocto-based headless music player built around a
+Raspberry Pi 3 and the Google AIY Voice HAT V1. The current interface
+provides local music playback, playlists, internet radio, network/cloud
+music, Bluetooth, Wi-Fi, storage, and system management. AI, Vosk, Piper,
+voice capture, and voice synthesis features have been removed from the
+current music-only product.
 
-## v0.3.0 development status
+## Current development status
 
 - **Platform** — Raspberry Pi 3 Model B (ARM64), Yocto Scarthgap 5.0 LTS,
   and systemd.
-- **Console** — kmscon on `tty1` with UTF-8/CJK display and automatic
-  local root login. A standard getty on `tty2` provides recovery login.
+- **Console** — kmscon on `tty1` with UTF-8/CJK display. The local
+  setup wizard and player menu open as root without a login prompt.
+  A standard getty on `tty2` provides recovery login.
   Login shells use `LANG=C.UTF-8`.
 - **Audio** — The image enables the Google AIY Voice HAT V1 device-tree
-  overlay, disables onboard Raspberry Pi audio, and includes ALSA utilities
-  for playback and recording. Speaker and microphone tests are part of
-  hardware validation.
+  overlay, disables onboard Raspberry Pi audio, and uses ALSA/PulseAudio
+  for speaker playback. Microphone capture and voice-processing features
+  are not included.
 - **Playback runtime** — The image includes mpv, Python 3, and Mutagen.
-  The music library interface, playlists, and button controls are planned.
+  The console provides local library browsing, playlists, shuffle, internet
+  radio, Bluetooth output, and network/cloud music browsing.
 - **Networking** — NetworkManager provides Wi-Fi management, OpenSSH
   provides remote access, and Avahi provides mDNS discovery.
 
@@ -79,8 +82,10 @@ three-partition card.
 
 The ext4 build artifact replaces P2 on an existing card with compatible
 boot files. Back up the card and verify the target partition before
-writing the image. The optional music partition mounts by label and
-can be absent at boot.
+writing the image. The optional music partition mounts by label at boot
+and can be absent. To mount an existing P3 manually, open **Hardware &
+system → Storage management → Mount Music Partition** on the local
+console. P3 must be ext4 with the label `AION-MUSIC`.
 
 The repository's [flash-aion.sh](flash-aion.sh) writes the base
 `core-image-aion` WIC image to an entire disk and erases its existing
@@ -101,26 +106,48 @@ On `tty1`, run `printf '%s\n' '中文 日本語 한국어'` to check CJK
 display. After copying an MP3 to the music partition, test playback with
 `mpv --no-video /mnt/music/example.mp3`, using the actual filename.
 
-## Planned AI connectivity
+## Music on an SMB share or Google Drive
 
-| Mode | Intended use |
-| --- | --- |
-| On-device | Play local music and handle basic playback commands offline. |
-| Home network | Connect to a self-hosted AI service on the local network for conversational requests. |
-| Cloud | Connect to a cloud AI service over the internet for conversational requests. |
+Open **Network & cloud music → Set up SMB or Google Drive** to create an
+rclone connection on the Pi.
 
-The player is intended to support basic playback with either external AI
-connection disabled or unavailable. Provider selection and integration
-are still open.
+- For an SMB share such as `//nas/Music`, choose the **SMB / CIFS**
+  backend. Enter `nas` as the host and provide the share account in
+  rclone's prompts. When opening this connection in AION, enter `Music`
+  as the folder path. [Rclone SMB setup](https://rclone.org/smb/)
+- For Google Drive, choose the **Google Drive** backend and
+  `drive.readonly` access. Use your own Google OAuth client and follow
+  rclone's prompts to authorize it from a computer with a web browser.
+  [Google Drive setup](https://rclone.org/drive/#making-your-own-client-id)
+  [Headless authorization](https://rclone.org/remote_setup/)
+
+Select **Browse a music connection** to open the remote folder and play
+MP3 or FLAC files. AION mounts the remote read-only while browsing and
+detaches it when you leave. Rclone keeps credentials in its own
+configuration file under the console user's home directory.
+
+## Main menu
+
+The main console menu is a music-only interface:
+
+- Browse and play local albums
+- Create, edit, and manage playlists
+- Shuffle all music
+- Play internet radio
+- Manage hardware and system settings
+- Browse network and cloud music
+- Exit the player
+
+AI connections, text prompts, microphone capture, offline transcription,
+voice synthesis, Gemini/ChatGPT OAuth, Vosk, and Piper are not included.
 
 ## Roadmap
 
-- Validate Voice HAT V1 playback and capture, plus button and LED behavior.
-- Implement library indexing, playlists, and playback controls.
-- Evaluate Vosk for offline voice commands.
-- Evaluate Piper and eSpeak NG for offline speech synthesis.
-- Integrate configurable home-network and cloud AI connections.
-- Document reproducible builds and complete Raspberry Pi 3 hardware tests.
+- Validate Voice HAT V1 speaker playback and Bluetooth output.
+- Complete library indexing, playlists, shuffle, and playback controls.
+- Improve remote SMB and Google Drive browsing.
+- Add reproducible P1/P2/P3 backup and flash procedures.
+- Document complete Raspberry Pi 3 hardware tests.
 
 See [TODO.md](TODO.md) for platform build and validation tasks.
 

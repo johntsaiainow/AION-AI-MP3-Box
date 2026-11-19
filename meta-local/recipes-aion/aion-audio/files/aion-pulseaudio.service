@@ -1,0 +1,32 @@
+[Unit]
+Description=AION Headless PulseAudio Service
+Wants=bluetooth.service
+After=dbus.service bluetooth.service
+
+[Service]
+Type=simple
+User=aion-audio
+Group=audio
+
+RuntimeDirectory=aion-pulse
+RuntimeDirectoryMode=0700
+
+StateDirectory=aion-audio
+StateDirectoryMode=0750
+
+Environment=HOME=/var/lib/aion-audio
+
+Environment=XDG_RUNTIME_DIR=/run/aion-pulse
+Environment=PULSE_RUNTIME_PATH=/run/aion-pulse/pulse
+
+ExecStartPre=/bin/mkdir -p /var/lib/aion-audio/.config/pulse
+ExecStart=/usr/bin/pulseaudio \
+    --daemonize=no \
+    --exit-idle-time=-1 \
+    --log-target=journal
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

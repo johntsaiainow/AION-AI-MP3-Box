@@ -1,0 +1,13 @@
+[Unit]
+Description=AION Bluetooth Auto-Reconnect
+Wants=bluetooth.service aion-pulseaudio.service
+After=bluetooth.service aion-pulseaudio.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 15
+ExecStart=/usr/bin/aion-bt-reconnect.sh
+TimeoutStartSec=240
+
+[Install]
+WantedBy=multi-user.target

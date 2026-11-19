@@ -1,0 +1,8 @@
+POKY_URL=https://git.yoctoproject.org/poky
+POKY_REV=6b7c1066f778db5a6b3e35400617b10342988fa8
+
+RPI_URL=https://git.yoctoproject.org/meta-raspberrypi
+RPI_REV=018d44467c4f09eb63f8ea5e86e85d755250cf89
+
+OE_URL=https://git.openembedded.org/meta-openembedded
+OE_REV=2db6aece32c7f8ebf6015b468e1b4e21de072e3b

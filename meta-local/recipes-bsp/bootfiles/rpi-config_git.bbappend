@@ -7,3 +7,7 @@ do_deploy:append:raspberrypi3-64() {
     sed -i '/^dtparam=audio=on$/d' \
         ${DEPLOYDIR}/${BOOTFILES_DIR_NAME}/config.txt
 }
+
+# AION T085 Bluetooth UART Overlay
+# BCM43430A1 verified stable at 460800 baud.
+RPI_EXTRA_CONFIG:append:raspberrypi3-64 = "\ndtoverlay=aion-bt-460800"

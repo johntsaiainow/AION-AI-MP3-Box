@@ -1,0 +1,17 @@
+[Unit]
+Description=AION AI MP3 Box Headless Player
+RequiresMountsFor=/mnt/music
+After=aion-pulseaudio.service
+Wants=aion-pulseaudio.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/mnt/music
+ExecStart=/usr/bin/python3 -u /mnt/music/player.py --standby
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
