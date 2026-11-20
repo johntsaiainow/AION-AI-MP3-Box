@@ -22,7 +22,7 @@ Yocto: Scarthgap 5.0 LTS
 - [ ] Verify getty recovery console on tty2.
 - [ ] Verify NetworkManager Wi-Fi connectivity.
 - [ ] Verify OpenSSH remote login.
-- [ ] Verify Avahi/mDNS discovery using aion.local.
+- [ ] Verify Avahi/mDNS discovery using `aiy-box-rebirth.local`.
 - [ ] Verify systemd service startup and recovery.
 - [ ] Validate SD card flashing scripts and device safeguards.
 - [ ] Record boot logs and hardware test results.

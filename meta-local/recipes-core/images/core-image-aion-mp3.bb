@@ -16,7 +16,7 @@ After=aion-pulseaudio.service mnt-music.mount
 
 [Service]
 ExecStart=
-ExecStart=/usr/bin/kmscon --vt=tty1 --seats=seat0 --no-switchvt --login -- /usr/bin/python3 -u /usr/bin/aion-session
+ExecStart=/usr/bin/kmscon --vt=tty1 --seats=seat0 --no-switchvt --login -- /usr/bin/python3 -u /usr/bin/aion-session --console-prompt
 UNIT
 
     # Enable a dedicated tty2 recovery console.
@@ -80,8 +80,21 @@ aion_install_utf8_profile() {
 
 ROOTFS_POSTPROCESS_COMMAND:append = " aion_install_utf8_profile; "
 
-# AION v0.4.0 Bluetooth Audio (A2DP Source)
-# Preserve existing MPV / ALSA / Google AIY Voice HAT.
+# Bluetooth media and phone calls through the Voice HAT.
+aion_bluetooth_audio() {
+    PULSE_CONFIG="${IMAGE_ROOTFS}${sysconfdir}/pulse/default.pa"
+    sed -i \
+        -e 's/^load-module module-bluetooth-discover$/& headset=auto/' \
+        -e 's/^load-module module-bluetooth-policy$/& ag_local_card=alsa_card.platform-soc_sound/' \
+        "$PULSE_CONFIG"
+
+    grep -qx 'load-module module-bluetooth-discover headset=auto' "$PULSE_CONFIG" &&
+        grep -qx 'load-module module-bluetooth-policy ag_local_card=alsa_card.platform-soc_sound' "$PULSE_CONFIG" ||
+        bbfatal "AION MP3: failed to configure Bluetooth call audio"
+}
+
+ROOTFS_POSTPROCESS_COMMAND:append = " aion_bluetooth_audio; "
+
 IMAGE_INSTALL:append = " \
     pulseaudio-server \
     pulseaudio \
@@ -115,7 +128,8 @@ IMAGE_BOOT_FILES:append = " aion-bt-460800.dtbo;overlays/aion-bt-460800.dtbo"
 do_image_wic[depends] += " aion-bt-overlay:do_deploy"
 
 IMAGE_INSTALL:append = " aion-player aion-rclone aion-vosk"
-IMAGE_ROOTFS_EXTRA_SPACE = "65536"
+# Keep the ext4 image within the existing 754 MiB P2 layout.
+IMAGE_ROOTFS_EXTRA_SPACE = "40960"
 
 # Keep the system journal on RootFS instead of the volatile tmpfs.
 aion_persistent_journal() {

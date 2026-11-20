@@ -1,0 +1,174 @@
+Subject: [PATCH] bluetooth: allow routing gateway audio to a specific local card
+
+Keep call audio on the built-in microphone and speaker regardless of
+the default music output. Leave A2DP routing under the existing policy.
+
+Upstream-Status: Pending
+
+diff --git a/src/modules/bluetooth/module-bluetooth-policy.c b/src/modules/bluetooth/module-bluetooth-policy.c
+--- a/src/modules/bluetooth/module-bluetooth-policy.c
++++ b/src/modules/bluetooth/module-bluetooth-policy.c
+@@ -38,12 +38,14 @@
+ PA_MODULE_USAGE(
+         "auto_switch=<Switch between hsp and a2dp profile? (0 - never, 1 - media.role=phone, 2 - heuristic> "
+         "a2dp_source=<Handle a2dp_source card profile (sink role)?> "
+-        "ag=<Handle headset_audio_gateway or handsfree_audio_gateway card profile (headset role)?> ");
++        "ag=<Handle headset_audio_gateway or handsfree_audio_gateway card profile (headset role)?> "
++        "ag_local_card=<local card for gateway audio>");
+ 
+ static const char* const valid_modargs[] = {
+     "auto_switch",
+     "a2dp_source",
+     "ag",
++    "ag_local_card",
+     NULL
+ };
+ 
+@@ -51,6 +53,7 @@
+     uint32_t auto_switch;
+     bool enable_a2dp_source;
+     bool enable_ag;
++    char *ag_local_card;
+     pa_hook_slot *source_put_slot;
+     pa_hook_slot *sink_put_slot;
+     pa_hook_slot *source_output_put_slot;
+@@ -93,9 +96,23 @@
+         return PA_HOOK_OK;
+     }
+ 
+-    /* Load module-loopback */
+-    args = pa_sprintf_malloc("source=\"%s\" source_dont_move=\"true\" sink_input_properties=\"media.role=%s\"", source->name,
+-                             role);
++    if (u->ag_local_card && pa_streq(role, "phone")) {
++        pa_sink *local_sink;
++        uint32_t idx;
++
++        PA_IDXSET_FOREACH(local_sink, c->sinks, idx) {
++            if (local_sink->card && pa_streq(local_sink->card->name, u->ag_local_card))
++                break;
++        }
++        if (!local_sink) {
++            pa_log_warn("No call speaker on card '%s'", u->ag_local_card);
++            return PA_HOOK_OK;
++        }
++
++        args = pa_sprintf_malloc("source=\"%s\" sink=\"%s\" source_dont_move=true sink_dont_move=true "
++                                 "sink_input_properties=\"media.role=phone\"", source->name, local_sink->name);
++    } else
++        args = pa_sprintf_malloc("source=\"%s\" source_dont_move=\"true\" sink_input_properties=\"media.role=%s\"", source->name, role);
+     (void) pa_module_load(&m, c, "module-loopback", args);
+     pa_xfree(args);
+ 
+@@ -132,9 +149,23 @@
+         return PA_HOOK_OK;
+     }
+ 
+-    /* Load module-loopback */
+-    args = pa_sprintf_malloc("sink=\"%s\" sink_dont_move=\"true\" source_output_properties=\"media.role=%s\"", sink->name,
+-                             role);
++    if (u->ag_local_card) {
++        pa_source *local_source;
++        uint32_t idx;
++
++        PA_IDXSET_FOREACH(local_source, c->sources, idx) {
++            if (!local_source->monitor_of && local_source->card && pa_streq(local_source->card->name, u->ag_local_card))
++                break;
++        }
++        if (!local_source) {
++            pa_log_warn("No call microphone on card '%s'", u->ag_local_card);
++            return PA_HOOK_OK;
++        }
++
++        args = pa_sprintf_malloc("source=\"%s\" sink=\"%s\" source_dont_move=true sink_dont_move=true "
++                                 "source_output_properties=\"media.role=phone\"", local_source->name, sink->name);
++    } else
++        args = pa_sprintf_malloc("sink=\"%s\" sink_dont_move=\"true\" source_output_properties=\"media.role=%s\"", sink->name, role);
+     (void) pa_module_load(&m, c, "module-loopback", args);
+     pa_xfree(args);
+ 
+@@ -333,7 +364,7 @@
+         if (profile->available == PA_AVAILABLE_NO)
+             continue;
+ 
+-        if (result == NULL ||
++        if (result == NULL || result->available == PA_AVAILABLE_NO ||
+             (profile->available == PA_AVAILABLE_YES && result->available == PA_AVAILABLE_UNKNOWN) ||
+             (profile->available == result->available && profile->priority > result->priority))
+             result = profile;
+@@ -377,7 +408,11 @@
+         if (!is_active_profile)
+             return PA_HOOK_OK;
+ 
+-        pa_assert_se((selected_profile = find_best_profile(card)));
++        /* Resume phone media after SCO closes, even if A2DP is idle. */
++        selected_profile = pa_streq(profile->name, "handsfree_audio_gateway") ?
++                           pa_hashmap_get(card->profiles, "a2dp_source") : NULL;
++        if (!selected_profile || selected_profile->available == PA_AVAILABLE_NO)
++            pa_assert_se((selected_profile = find_best_profile(card)));
+ 
+         if (selected_profile == card->active_profile)
+             return PA_HOOK_OK;
+@@ -448,6 +483,7 @@
+         goto fail;
+     }
+ 
++    u->ag_local_card = pa_xstrdup(pa_modargs_get_value(ma, "ag_local_card", NULL));
+     u->will_need_revert_card_map = pa_hashmap_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+ 
+     u->source_put_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SOURCE_PUT], PA_HOOK_NORMAL,
+@@ -515,5 +551,6 @@
+ 
+     pa_hashmap_free(u->will_need_revert_card_map);
+ 
++    pa_xfree(u->ag_local_card);
+     pa_xfree(u);
+ }
+diff --git a/src/modules/bluetooth/module-bluez5-device.c b/src/modules/bluetooth/module-bluez5-device.c
+--- a/src/modules/bluetooth/module-bluez5-device.c
++++ b/src/modules/bluetooth/module-bluez5-device.c
+@@ -1945,14 +1945,15 @@
+ }
+ 
+ /* Run from main thread */
+-static pa_available_t transport_state_to_availability(pa_bluetooth_transport_state_t state) {
+-    switch (state) {
++static pa_available_t transport_state_to_availability(const pa_bluetooth_transport *transport) {
++    switch (transport->state) {
+         case PA_BLUETOOTH_TRANSPORT_STATE_DISCONNECTED:
+             return PA_AVAILABLE_NO;
+         case PA_BLUETOOTH_TRANSPORT_STATE_PLAYING:
+             return PA_AVAILABLE_YES;
+         default:
+-            return PA_AVAILABLE_UNKNOWN;
++            /* The phone opens SCO when call audio is routed to the box. */
++            return transport->profile == PA_BLUETOOTH_PROFILE_HFP_AG ? PA_AVAILABLE_NO : PA_AVAILABLE_UNKNOWN;
+     }
+ }
+ 
+@@ -2137,7 +2138,7 @@
+ 
+     case PA_BLUETOOTH_PROFILE_HFP_AG:
+         cp = pa_card_profile_new(name, _("Handsfree Audio Gateway (HFP)"), sizeof(pa_bluetooth_profile_t));
+-        cp->priority = 10;
++        cp->priority = 50;
+         cp->n_sinks = 1;
+         cp->n_sources = 1;
+         cp->max_sink_channels = 1;
+@@ -2155,7 +2156,7 @@
+     *p = profile;
+ 
+     if (u->device->transports[*p])
+-        cp->available = transport_state_to_availability(u->device->transports[*p]->state);
++        cp->available = transport_state_to_availability(u->device->transports[*p]);
+     else
+         cp->available = PA_AVAILABLE_NO;
+ 
+@@ -2336,7 +2337,7 @@
+      * make profile unavailable.
+      */
+     if (!t->device->codec_switching_in_progress)
+-        pa_card_profile_set_available(cp, transport_state_to_availability(t->state));
++        pa_card_profile_set_available(cp, transport_state_to_availability(t));
+ 
+     /* Update port availability */
+     pa_assert_se(port = pa_hashmap_get(u->card->ports, u->output_port_name));

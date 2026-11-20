@@ -1,7 +1,7 @@
 [Unit]
 Description=AION Headless PulseAudio Service
-Wants=bluetooth.service
-After=dbus.service bluetooth.service
+Wants=bluetooth.service ofono.service
+After=dbus.service bluetooth.service ofono.service
 
 [Service]
 Type=simple

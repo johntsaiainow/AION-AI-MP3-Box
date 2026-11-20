@@ -8,8 +8,10 @@ import math
 import select
 import socket
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import random
 import re
 import shutil
@@ -22,15 +24,24 @@ import termios
 import time
 import tty
 
-from aion_ui import accent, dashboard, options, screen, selection, set_language, tr
+from aion_ui import (
+    accent, dashboard, fit_cells, options, playback_cover_size, playback_frame, screen, selection, set_language, tr,
+)
+from aion_local_info import DEFAULT_TIME_ZONE, LocalInformation
+from aion_media_info import load_media, lyric_at
+from aion_voice_button import open_voice_button, set_voice_lamp
 
 try:
+    from mutagen import MutagenError
     from mutagen.flac import FLAC
     from mutagen.mp3 import MP3
     from mutagen.id3 import ID3, APIC, PictureType
 except ImportError:
     FLAC = MP3 = ID3 = APIC = PictureType = None
+    MutagenError = OSError
 
+LOCAL_INFORMATION = LocalInformation()
+MEDIA_LOOKUPS = ThreadPoolExecutor(max_workers=2)
 SUPPORTED_EXTS = ('.flac', '.mp3')
 PLAYLIST_NAME = re.compile(r'^[^/\\\x00-\x1f]{1,100}$')
 RADIO_STATIONS = (
@@ -195,13 +206,23 @@ def write_playlist(root, path, tracks):
             os.unlink(tmp)
 
 
+def menu_page(title, entries, subtitle=None, *, group_break=None, status=None):
+    settings = load_aion_settings()
+    LOCAL_INFORMATION.configure(
+        settings.get("device_location"),
+        settings.get("time_zone") or DEFAULT_TIME_ZONE,
+        settings.get("daylight_saving", True),
+        settings.get("commute"),
+    )
+    return dashboard(title, subtitle, entries, group_break, status, LOCAL_INFORMATION.lines)
+
+
 def choose(items, heading):
     if not items:
         print(tr('No items available.', '沒有可用項目。'))
         return None
-    screen(heading)
-    options(enumerate(items, 1))
-    answer = input(tr('Number (Enter to cancel): ', '輸入編號（按 Enter 取消）：')).strip()
+    entries = [*enumerate(items, 1), (0, tr('Back', '返回'))]
+    answer = menu_page(heading, entries)
     if not answer.isdecimal() or not 1 <= int(answer) <= len(items):
         return None
     return int(answer) - 1
@@ -228,34 +249,61 @@ def choose_song(root):
     return tracks[i] if i is not None else None
 
 
-def cover(song):
-    if MP3 is None or FLAC is None:
-        return
+def embedded_cover(song):
     try:
-        data = None
-        if song.suffix.lower() == '.flac':
-            for picture in FLAC(str(song)).pictures:
-                if picture.type == 3:
-                    data = picture.data
-                    break
+        if song.suffix.lower() == ".flac" and FLAC is not None:
+            pictures = FLAC(str(song)).pictures
+        elif song.suffix.lower() == ".mp3" and MP3 is not None:
+            tags = MP3(str(song), ID3=ID3).tags or {}
+            pictures = [tag for tag in tags.values() if isinstance(tag, APIC)]
         else:
-            tags = MP3(str(song), ID3=ID3).tags
-            if tags:
-                for tag in tags.values():
-                    if isinstance(tag, APIC):
-                        data = tag.data
-                        break
-        if data:
-            with tempfile.NamedTemporaryFile(suffix='.jpg') as tmp:
-                tmp.write(data)
-                tmp.flush()
-                try:
-                    subprocess.run(['chafa', '--size=40x20', tmp.name], check=False)
-                except FileNotFoundError:
-                    pass
-    except Exception:
-        pass
+            return None
+    except (OSError, MutagenError):
+        return None
+    front = next((picture for picture in pictures if picture.type == PictureType.COVER_FRONT), None)
+    picture = front or (pictures[0] if pictures else None)
+    return picture.data if picture is not None else None
 
+
+def cover(song, downloaded=None):
+    if not sys.stdout.isatty() or os.environ.get("TERM", "dumb") == "dumb":
+        return ()
+    chafa = shutil.which("chafa")
+    if not chafa:
+        return ()
+
+    columns, rows = shutil.get_terminal_size((80, 24))
+    width, height = playback_cover_size(columns, rows)
+    colors = "none" if "NO_COLOR" in os.environ else "256"
+    command = [chafa, "--format=symbols", f"--colors={colors}", "--animate=off", "--probe=off", "--polite=on",
+               f"--size={width}x{height}"]
+
+    def render(path):
+        result = subprocess.run([*command, str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=5, check=False, encoding="utf-8", errors="replace")
+        return tuple(result.stdout.splitlines()) if result.returncode == 0 else ()
+
+    try:
+        song = Path(song)
+        if data := (downloaded if downloaded is not None else embedded_cover(song)):
+            with tempfile.NamedTemporaryFile(prefix="aion-cover-") as image:
+                image.write(data)
+                image.flush()
+                if lines := render(image.name):
+                    return lines
+        if downloaded is not None:
+            return ()
+
+        names = {entry.name.casefold(): entry for entry in song.parent.iterdir()}
+        for stem in ("cover", "folder", "front", "album"):
+            for suffix in (".jpg", ".jpeg", ".png"):
+                path = names.get(stem + suffix)
+                if path is not None and path.is_file():
+                    if lines := render(path):
+                        return lines
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ()
 
 
 def mpv_ipc(socket_path, command):
@@ -354,59 +402,196 @@ def spectrum_bars(pcm):
     return " ".join(bars)
 
 
-def playback_controls(process, socket_path, env):
-    global _aion_volume, _music_preset
-    screen(tr("Playback controls", "播放控制"))
-    print(tr("+/− Volume · m Mute · v Sound bar · p Pause · q Stop",
-             "+/− 音量 · m 靜音 · v 音量條 · p 暫停 · q 停止"))
-    print(tr("Music preset (1–6)", "音色預設（1–6）"))
-    options((key, tr(english, chinese))
-            for key, (english, chinese, _) in enumerate(MUSIC_PRESETS, 1))
-    print(tr("Selected:", "目前使用："), tr(*MUSIC_PRESETS[_music_preset][:2]))
+def playback_display_available():
+    return (sys.stdin.isatty() and sys.stdout.isatty()
+            and os.environ.get("TERM", "dumb") != "dumb"
+            and shutil.get_terminal_size((80, 24)).columns >= 34
+            and shutil.get_terminal_size((80, 24)).lines >= 14)
 
+
+def playback_progress(position, duration):
+    def timestamp(seconds):
+        minutes, seconds = divmod(max(0, int(seconds)), 60)
+        return f"{minutes:02d}:{seconds:02d}"
+
+    if not duration:
+        return timestamp(position)
+    filled = max(0, min(12, int(position / duration * 12)))
+    return "━" * filled + "─" * (12 - filled) + f"  {timestamp(position)} / {timestamp(duration)}"
+
+
+def playback_controls(process, socket_path, env, tracks=(), station=None):
+    global _aion_volume, _music_preset
     terminal = sys.stdin.isatty() and sys.stdout.isatty()
-    meter = terminal and os.environ.get("TERM", "dumb") != "dumb"
-    capture = start_spectrum(env) if meter else None
-    if meter and capture is None:
-        print(tr("Spectrum unavailable for this output.", "此音訊輸出無法顯示頻譜。"))
+    display = playback_display_available()
+    if not display:
+        screen(tr("Playback controls", "播放控制"), station)
+        print(tr("+/− Volume · M Mute · V Volume · P Pause · Q Stop",
+                 "+/− 音量 · M 靜音 · V 音量 · P 暫停 · Q 停止"))
+        options((key, tr(english, chinese))
+                for key, (english, chinese, _) in enumerate(MUSIC_PRESETS, 1))
+
+    capture = start_spectrum(env) if display else None
+    button = open_voice_button() if display else None
+    last_button_event = -150_000_000
     terminal_settings = termios.tcgetattr(sys.stdin) if terminal else None
     pcm = b""
-    last_draw = 0.0
-    visible = False
+    current_track = None
+    lookup = lookup_token = None
+    media = SimpleQueue()
+    timed = plain = ()
+    title = station or ""
+    artist_album = ""
+    artwork = ()
+    downloaded_art = None
+    cover_status = ""
+    position = duration = 0.0
+    next_query = next_frame = 0.0
+    paused = muted = False
+    notice = ""
+    lyrics_open = False
+    first_line = 0
+    old_frame = ()
+    last_size = None
 
     def query(property_name):
         return mpv_ipc(socket_path, ["get_property", property_name])
 
+    def select_track(index):
+        nonlocal current_track, lookup, lookup_token, timed, plain, position, duration
+        nonlocal title, artist_album, artwork, downloaded_art, cover_status, first_line
+        if lookup is not None:
+            lookup.cancel()
+        current_track = index
+        timed = plain = ()
+        position = duration = 0.0
+        first_line = 0
+        track = Path(tracks[index])
+        title, artist_album = track.stem, ""
+        downloaded_art = None
+        artwork = cover(track)
+        needs_cover = bool(shutil.which("chafa")) and not artwork
+        cover_status = (tr("Looking up artwork…", "正在查找封面…") if needs_cover
+                        else tr("Artwork unavailable", "沒有可用封面"))
+        token = lookup_token = object()
+        lookup = MEDIA_LOOKUPS.submit(load_media, track, needs_cover,
+                                      lambda kind, data: media.put((token, kind, data)))
+
+    def draw():
+        nonlocal old_frame, last_size, artwork, first_line
+        columns, rows = shutil.get_terminal_size((80, 24))
+        if columns < 34 or rows < 14:
+            return
+        size = columns, rows
+        if size != last_size:
+            old_frame = ()
+            if last_size and current_track is not None:
+                artwork = cover(tracks[current_track], downloaded=downloaded_art)
+            last_size = size
+        lyrics = plain or tuple(text for _, text in timed)
+        if lyrics_open:
+            first_line = min(first_line, max(0, len(lyrics) - rows + 6))
+        state = tr("Paused", "已暫停") if paused else (tr("Live radio", "電台直播") if station else tr("Playing", "播放中"))
+        volume = tr("Muted", "靜音") if muted else f"{_aion_volume:.0f}%"
+        audio = f"{tr('Volume', '音量')} {volume}  ·  {tr(*MUSIC_PRESETS[_music_preset][:2])}"
+        lyric = lyric_at(timed, position) if timed else tr("L · Lyrics (no timestamps)", "L · 查看未同步歌詞") if plain else ""
+        view = {
+            "title": title or tr("Loading…", "載入中…"),
+            "artist_album": artist_album,
+            "state": state,
+            "progress": playback_progress(position, duration),
+            "audio": audio,
+            "cover": artwork,
+            "cover_status": cover_status,
+            "spectrum": spectrum_bars(pcm) if len(pcm) == 2 * SPECTRUM_SIZE else "",
+            "lyric": lyric,
+            "notice": notice,
+            "music": bool(tracks),
+        }
+        lyrics_page = lyrics or (tr("No lyrics available.", "找不到歌詞。"),)
+        frame = playback_frame(columns, rows, view, lyrics_page if lyrics_open else None, first_line)
+        changes = []
+        for row, line in enumerate(frame, 1):
+            if not old_frame or line != old_frame[row - 1]:
+                changes.append(f"\033[{row};1H\033[2K{line}")
+        if changes:
+            sys.stdout.write("".join(changes))
+            sys.stdout.flush()
+        old_frame = frame
+
     try:
+        if display:
+            print("\033[?1049h\033[?25l\033[2J", end="", flush=True)
+            if tracks:
+                select_track(0)
+            if button:
+                set_voice_lamp(button, True)
         if terminal_settings is not None:
             tty.setcbreak(sys.stdin)
         while process.poll() is None:
             readers = [sys.stdin]
             if capture and capture.stdout:
                 readers.append(capture.stdout)
-            ready, _, _ = select.select(readers, [], [], 0.2)
+            if button:
+                readers.append(button.fd)
+            ready, _, _ = select.select(readers, [], [], 0.15)
             if capture and capture.stdout in ready:
                 packet = os.read(capture.stdout.fileno(), 8192)
                 if packet:
                     pcm = (pcm + packet)[-2 * SPECTRUM_SIZE:]
-                    now = time.monotonic()
-                    if len(pcm) == 2 * SPECTRUM_SIZE and now - last_draw >= 0.15:
-                        label = tr("Spectrum", "頻譜")
-                        print(f"\r\033[K{label}  {accent(spectrum_bars(pcm))}", end="", flush=True)
-                        last_draw = now
-                        visible = True
                 else:
                     capture.stdout.close()
                     capture.wait()
                     capture = None
-                    if visible:
-                        print("\r\033[K", end="", flush=True)
-                        visible = False
-                    print(tr("Spectrum unavailable for this output.", "此音訊輸出無法顯示頻譜。"))
-            if sys.stdin not in ready:
+                    pcm = b""
+            now = time.monotonic()
+            if display and now >= next_query:
+                next_query = now + 0.35
+                try:
+                    if tracks:
+                        index = int(query("playlist-pos"))
+                        if 0 <= index < len(tracks) and index != current_track:
+                            select_track(index)
+                    position = float(query("time-pos"))
+                    if tracks and not duration:
+                        duration = float(query("duration") or 0)
+                except (OSError, TypeError, ValueError):
+                    pass
+            while True:
+                try:
+                    token, kind, data = media.get_nowait()
+                except Empty:
+                    break
+                if token is not lookup_token:
+                    continue
+                if kind == "metadata":
+                    name, artist, album = data
+                    title = name or title
+                    artist_album = "  ·  ".join(value for value in (artist, album) if value)
+                elif kind == "lyrics":
+                    timed, plain = data
+                elif kind == "cover":
+                    downloaded_art = data
+                    artwork = cover(tracks[current_track], downloaded=data) if data else ()
+                    cover_status = tr("Artwork unavailable", "沒有可用封面")
+            if display and now >= next_frame:
+                draw()
+                next_frame = now + 0.15
+            key = ""
+            if button and button.fd in ready:
+                try:
+                    for event in button.read_edge_events():
+                        if event.timestamp_ns - last_button_event >= 150_000_000:
+                            last_button_event = event.timestamp_ns
+                            key = "p"
+                except OSError:
+                    button.release()
+                    button = None
+            if not key and sys.stdin not in ready:
                 continue
-            key = (os.read(sys.stdin.fileno(), 1).decode("ascii", "ignore")
-                   if terminal else sys.stdin.readline())
+            if not key:
+                key = (os.read(sys.stdin.fileno(), 1).decode("ascii", "ignore")
+                       if terminal else sys.stdin.readline())
             if not key:
                 if terminal:
                     continue
@@ -414,42 +599,62 @@ def playback_controls(process, socket_path, env):
             key = key.strip().lower()
             if not key:
                 continue
-            if visible:
-                print("\r\033[K", end="", flush=True)
-                visible = False
-
+            notice = ""
             try:
-                if key in ("+", "-"):
+                if key in ("+", "-", "v"):
                     current = float(query("volume"))
-                    delta = 5 if key == "+" else -5
-                    target = max(0, min(100, current + delta))
-                    mpv_ipc(socket_path, ["set_property", "volume", target])
-                    _aion_volume = float(query("volume"))
-                    sound_bar(_aion_volume, query("mute"))
-                elif key == "m":
+                    if key != "v":
+                        delta = 5 if key == "+" else -5
+                        mpv_ipc(socket_path, ["set_property", "volume", max(0, min(100, current + delta))])
+                        current = float(query("volume"))
+                    _aion_volume = current
                     muted = bool(query("mute"))
-                    mpv_ipc(socket_path, ["set_property", "mute", not muted])
-                    sound_bar(query("volume"), query("mute"))
-                elif key == "v":
-                    sound_bar(query("volume"), query("mute"))
+                    if display:
+                        notice = tr("Muted", "已靜音") if muted else f"{tr('Volume', '音量')} {current:.0f}%"
+                    else:
+                        sound_bar(current, muted)
+                elif key == "m":
+                    muted = not bool(query("mute"))
+                    mpv_ipc(socket_path, ["set_property", "mute", muted])
+                    if not display:
+                        sound_bar(query("volume"), muted)
                 elif key == "p":
-                    paused = bool(query("pause"))
-                    mpv_ipc(socket_path, ["set_property", "pause", not paused])
-                    print(tr("Playing", "播放中") if paused else tr("Paused", "已暫停"))
+                    paused = not bool(query("pause"))
+                    mpv_ipc(socket_path, ["set_property", "pause", paused])
+                    if button:
+                        set_voice_lamp(button, not paused)
+                    if not display:
+                        print(tr("Paused", "已暫停") if paused else tr("Playing", "播放中"))
                 elif key == "q":
                     break
+                elif display and key == "l" and tracks:
+                    lyrics_open = not lyrics_open
+                    first_line = 0
+                elif lyrics_open and key in ("j", "k"):
+                    first_line = max(0, first_line + (1 if key == "j" else -1))
                 elif key in "123456" and len(key) == 1:
                     preset = int(key) - 1
                     mpv_ipc(socket_path, ["af", "set", preset_filter(preset)])
                     _music_preset = preset
-                    print(tr("Selected:", "目前使用："), tr(*MUSIC_PRESETS[preset][:2]), flush=True)
+                    if not display:
+                        print(tr("Selected:", "目前使用："), tr(*MUSIC_PRESETS[preset][:2]), flush=True)
             except (OSError, ValueError, TypeError) as exc:
-                print(tr("Playback control unavailable:", "無法控制播放："), exc)
+                if display:
+                    notice = tr("Playback control unavailable", "無法控制播放")
+                else:
+                    print(tr("Playback control unavailable:", "無法控制播放："), exc)
+            if display:
+                draw()
     finally:
+        if button:
+            set_voice_lamp(button, False)
+            button.release()
+        if lookup is not None:
+            lookup.cancel()
         if terminal_settings is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, terminal_settings)
-        if visible:
-            print("\r\033[K", end="", flush=True)
+        if display:
+            print("\033[0m\033[?25h\033[?1049l", end="", flush=True)
         if capture:
             capture.terminate()
             try:
@@ -486,7 +691,6 @@ def play(tracks, *, shuffle=False, repeat=False, station=None):
             "Playing {count} track(s) · Output {output} · Repeat {repeat}",
             "播放 {count} 首曲目 · 輸出 {output} · 循環 {repeat}",
         ).format(count=len(tracks), output=backend, repeat=repeat_label))
-        cover(tracks[0])
 
     with tempfile.TemporaryDirectory(prefix="aion-mpv-") as temp:
         ipc_path = str(Path(temp) / "mpv.sock")
@@ -507,6 +711,9 @@ def play(tracks, *, shuffle=False, repeat=False, station=None):
         audio_filter = preset_filter(_music_preset)
         if audio_filter:
             command.append("--af=" + audio_filter)
+
+        if playback_display_available():
+            command.append("--terminal=no")
 
         if repeat:
             command.append("--loop-playlist=inf")
@@ -538,7 +745,7 @@ def play(tracks, *, shuffle=False, repeat=False, station=None):
                 time.sleep(0.1)
 
             if process.poll() is None:
-                playback_controls(process, ipc_path, env)
+                playback_controls(process, ipc_path, env, tracks=tracks if station is None else (), station=station)
         except KeyboardInterrupt:
             print("\n" + tr("Stopping playback.", "正在停止播放。"))
         finally:
@@ -553,15 +760,18 @@ def play(tracks, *, shuffle=False, repeat=False, station=None):
             log_event(f"Playback failed: {medium}; mpv exit={process.returncode}", "warning")
             if station is not None:
                 print(tr("The live stream could not be played.", "無法播放電台直播。"))
+            else:
+                print(tr("The selected music could not be played.", "無法播放選取的音樂。"))
+            if playback_display_available():
+                input(tr("Press Enter to return.", "按 Enter 返回。"))
 
 
 def radio_menu():
     while True:
-        screen(tr("Internet radio", "網路電台"))
-        options((i, tr(english, chinese))
-                for i, (english, chinese, _) in enumerate(RADIO_STATIONS, 1))
-        options(((0, tr("Back", "返回")),))
-        choice = selection()
+        entries = [(i, tr(english, chinese))
+                   for i, (english, chinese, _) in enumerate(RADIO_STATIONS, 1)]
+        entries.append((0, tr("Back", "返回")))
+        choice = menu_page(tr("Internet radio", "網路電台"), entries)
         if choice in ('', '0'):
             return
         if not choice.isdecimal() or not 1 <= int(choice) <= len(RADIO_STATIONS):
@@ -579,13 +789,13 @@ def browse_remote_music(root):
             (entry for entry in folder.iterdir() if not entry.is_symlink() and entry.is_dir()),
             key=lambda path: path.name.casefold(),
         )
-        screen(tr("Remote music", "遠端音樂"), folder.relative_to(root).as_posix())
+        entries = []
         if tracks:
-            options(((1, tr("Play a track", "播放單首曲目")),
-                     (2, tr("Play all tracks in this folder", "播放此資料夾的所有曲目"))))
-        options((index, directory.name + "/") for index, directory in enumerate(directories, 3))
-        options(((0, tr("Back", "返回")),))
-        choice = selection()
+            entries.extend(((1, tr("Play a track", "播放單首曲目")),
+                            (2, tr("Play all tracks in this folder", "播放此資料夾的所有曲目"))))
+        entries.extend((index, directory.name + "/") for index, directory in enumerate(directories, 3))
+        entries.append((0, tr("Back", "返回")))
+        choice = menu_page(tr("Remote music", "遠端音樂"), entries, folder.relative_to(root).as_posix())
         if choice in ("", "0"):
             if folder == root:
                 return
@@ -654,11 +864,11 @@ def remote_music_menu():
         input(tr("Press Enter to return.", "按 Enter 返回。"))
         return
     while True:
-        screen(tr("Network & cloud music", "網路與雲端音樂"))
-        options(((1, tr("Browse a music connection", "瀏覽音樂連線")),
-                 (2, tr("Set up SMB or Google Drive", "設定 SMB 或 Google Drive")),
-                 (0, tr("Back", "返回"))))
-        choice = selection()
+        choice = menu_page(tr("Network & cloud music", "網路與雲端音樂"), (
+            (1, tr("Browse a music connection", "瀏覽音樂連線")),
+            (2, tr("Set up SMB or Google Drive", "設定 SMB 或 Google Drive")),
+            (0, tr("Back", "返回")),
+        ))
         try:
             if choice in ("", "0"):
                 return
@@ -678,16 +888,14 @@ def album_menu(root):
         return
     tracks = audio_files(album)
     while True:
-        screen(tr('Album', '專輯'), str(album.relative_to(root)))
-        options((
+        choice = menu_page(tr('Album', '專輯'), (
             (1, tr('Play entire album', '播放整張專輯')),
             (2, tr('Play a track', '播放單首曲目')),
             (3, tr('Shuffle album', '隨機播放專輯')),
             (4, tr('Repeat album', '循環播放專輯')),
             (5, tr('Add album to playlist', '將專輯加入播放清單')),
             (0, tr('Back', '返回')),
-        ))
-        choice = selection()
+        ), str(album.relative_to(root)))
         if choice == '0':
             return
         if choice == '1':
@@ -781,15 +989,13 @@ def playlist_menu(root):
         return
     while True:
         tracks = read_playlist(root, path)
-        screen(tr('Playlist', '播放清單'), path.stem)
-        options((
+        choice = menu_page(tr('Playlist', '播放清單'), (
             (1, tr('Play all', '播放全部')),
             (2, tr('Shuffle', '隨機播放')),
             (3, tr('Repeat', '循環播放')),
             (4, tr('Play a track', '播放單首曲目')),
             (0, tr('Back', '返回')),
-        ))
-        choice = selection()
+        ), path.stem)
         if choice == '0':
             return
         if choice == '1':
@@ -875,8 +1081,7 @@ def event_log_menu():
 
 def hardware_menu():
     while True:
-        screen(tr('Hardware & system', '硬體與系統'))
-        options((
+        choice = menu_page(tr('Hardware & system', '硬體與系統'), (
             (1, tr('Wi-Fi management', 'Wi-Fi 管理')),
             (2, tr('Bluetooth management', '藍牙管理')),
             (3, tr('Storage management', '儲存裝置管理')),
@@ -886,16 +1091,18 @@ def hardware_menu():
             (7, tr('Configuration wizard', '設定精靈')),
             (8, tr('System event log', '系統事件記錄')),
             (9, tr('Language', '語言')),
-            (10, tr('Device location', '設備地點')),
+            (10, tr('Time zone and daylight saving', '時區與日光節約時間')),
+            (11, tr('Device location', '設備地點')),
+            (12, tr('TomTom traffic key', 'TomTom 路況金鑰')),
+            (13, tr('Commute addresses', '通勤地址')),
             (0, tr('Back to music', '返回音樂選單')),
         ))
-        choice = selection()
 
         if choice == '0':
             return
         elif choice == '1':
             run_management_command(
-                ['aion-wifi-menu', 'aion-wifi'],
+                ['aion-wifi-menu', 'aion-wifi', 'nmtui'],
                 tr('Wi-Fi Management', 'Wi-Fi 管理'))
         elif choice == '2':
             bluetooth_menu()
@@ -914,6 +1121,7 @@ def hardware_menu():
             print(tr('System:', '系統：'), platform.platform())
             print('Python:', platform.python_version())
             print(tr('Music root:', '音樂目錄：'), music_root())
+            input(tr("Press Enter to return.", "按 Enter 返回。"))
         elif choice == '7':
             subprocess.run(
                 ['/usr/bin/python3', '/usr/bin/aion-setup', '--force'],
@@ -926,15 +1134,20 @@ def hardware_menu():
             subprocess.run(['/usr/bin/python3', '/usr/bin/aion-setup', '--language'], check=False)
             set_language(load_aion_settings().get('language'))
         elif choice == '10':
+            subprocess.run(['/usr/bin/python3', '/usr/bin/aion-setup', '--timezone'], check=False)
+        elif choice == '11':
             subprocess.run(['/usr/bin/python3', '/usr/bin/aion-setup', '--location'], check=False)
+        elif choice == '12':
+            subprocess.run(['/usr/bin/python3', '/usr/bin/aion-setup', '--traffic-key'], check=False)
+        elif choice == '13':
+            subprocess.run(['/usr/bin/python3', '/usr/bin/aion-setup', '--commute'], check=False)
         else:
             print(tr('Invalid selection.', '選項無效。'))
 
 
 def playlist_management_menu(root):
     while True:
-        screen(tr('Playlist management', '播放清單管理'))
-        options((
+        choice = menu_page(tr('Playlist management', '播放清單管理'), (
             (1, tr('Browse and play playlists', '瀏覽與播放清單')),
             (2, tr('Create a playlist', '建立播放清單')),
             (3, tr('Add a song', '加入歌曲')),
@@ -942,7 +1155,6 @@ def playlist_management_menu(root):
             (5, tr('Rename or delete a playlist', '重新命名或刪除播放清單')),
             (0, tr('Back to music', '返回音樂選單')),
         ))
-        choice = selection()
 
         if choice == '0':
             return
@@ -980,11 +1192,16 @@ def interactive(root):
         )
 
         try:
-            choice = dashboard(tr('Main menu', '主選單'), str(root), entries, 5, status)
+            choice = menu_page(tr('Main menu', '主選單'), entries, str(root), group_break=5, status=status)
             status = None
 
             if choice == '0':
-                return
+                answer = input(tr('Exit to the console prompt? [y/N] ',
+                                  '確定離開並回到 Console？[y/N] ')).strip().casefold()
+                if answer in ('y', 'yes', '是', '確定'):
+                    print(tr('To reopen the main menu, run aion-player-console.',
+                             '要回到主選單，請輸入 aion-player-console 並按 Enter。'), flush=True)
+                    return
             elif choice == '1':
                 album_menu(root)
             elif choice == '2':

@@ -68,13 +68,14 @@ def main():
             )
             return 1
 
-    os.execve(
-        PYTHON,
-        [PYTHON, PLAYER, "--interactive"],
-        env,
-    )
+    command = [PYTHON, PLAYER, "--interactive"]
+    if "--console-prompt" not in sys.argv[1:]:
+        os.execve(PYTHON, command, env)
 
-    return 0
+    result = subprocess.run(command, env=env, check=False)
+    if result.returncode:
+        return result.returncode
+    os.execve("/bin/sh", ["/bin/sh", "-i"], env)
 
 
 if __name__ == "__main__":

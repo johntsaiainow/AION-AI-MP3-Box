@@ -9,6 +9,8 @@
 
         __overlay__ {
             max-speed = <460800>;
+            /* Deliver call audio over the HCI UART to the Linux SCO socket. */
+            brcm,bt-pcm-int-params = [01 02 00 01 01];
         };
     };
 };

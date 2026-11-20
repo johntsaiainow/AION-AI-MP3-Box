@@ -6,6 +6,7 @@ inherit useradd systemd
 
 SRC_URI = " \
     file://aion-pulseaudio.service \
+    file://aion-ofono.conf \
     file://aion-bt-reconnect.service \
     file://aion-bt-reconnect.sh \
 "
@@ -22,7 +23,7 @@ USERADD_PARAM:${PN} = "\
     aion-audio \
 "
 
-RDEPENDS:${PN} = "pulseaudio-server"
+RDEPENDS:${PN} = "pulseaudio-server ofono"
 
 SYSTEMD_SERVICE:${PN} = "aion-pulseaudio.service aion-bt-reconnect.service"
 SYSTEMD_AUTO_ENABLE:${PN} = "enable"
@@ -30,6 +31,8 @@ SYSTEMD_AUTO_ENABLE:${PN} = "enable"
 do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -d ${D}${bindir}
+    install -d ${D}${datadir}/dbus-1/system.d
+    install -m 0644 ${WORKDIR}/aion-ofono.conf ${D}${datadir}/dbus-1/system.d/
 
     install -m 0755 \
         ${WORKDIR}/aion-bt-reconnect.sh \
@@ -47,4 +50,5 @@ FILES:${PN} = "\
     ${systemd_system_unitdir}/aion-pulseaudio.service \
     ${systemd_system_unitdir}/aion-bt-reconnect.service \
     ${bindir}/aion-bt-reconnect.sh \
+    ${datadir}/dbus-1/system.d/aion-ofono.conf \
 "

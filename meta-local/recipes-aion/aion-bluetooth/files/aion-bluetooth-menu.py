@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
+import subprocess
 import sys
 import types
 
@@ -230,29 +232,49 @@ def select_audio():
     print(tr('Note: existing playback streams may need restarting.', '目前的播放可能需要重新啟動。'))
 
 
-def pair_phone():
-    heading(tr('Play music from a phone', '從手機播放音樂'))
-    print(tr('Open Bluetooth settings on your phone and select aion.', '在手機的藍牙設定中選擇 aion。'))
+def pair_phone(speakerphone=False):
+    if speakerphone:
+        heading(tr('Phone speakerphone', '手機免持通話'))
+        print(tr('Enable phone calls for the box if your phone shows that setting.', '若手機顯示「通話音訊」選項，請為本機啟用。'))
+        print(tr('Answer or place a call on your phone and select the box as the call audio output.', '請在手機上接聽或撥號，並選擇本機作為通話音訊輸出。'))
+    else:
+        heading(tr('Play music from a phone', '從手機播放音樂'))
+        print(tr("Select the box as your phone's media output and start playback.", '將手機的媒體輸出設為本機，再開始播放。'))
+    print(tr('Open Bluetooth settings on your phone and select {name}.',
+             '在手機的藍牙設定中選擇 {name}。').format(name=socket.gethostname()))
+    print(tr('At the Bluetooth prompt, type default-agent before starting a new pairing.', '開始新配對前，請在藍牙提示符號下輸入 default-agent。'))
     print(tr('Confirm a matching code on both devices. Type yes here if prompted.', '確認兩台裝置的配對碼相同。若出現提示，請輸入 yes。'))
-    print(tr("Select aion as your phone's media output and start playback.", '將手機的媒體輸出設為 aion，再開始播放。'))
     print(tr('Type exit to return. Pairing mode closes after two minutes.', '輸入 exit 返回。配對模式會在兩分鐘後關閉。'), flush=True)
     bt.phone_pairing()
+
+
+def phone_sms():
+    mac = select_device(paired=True)
+    if mac is None:
+        return
+    client = Path(__file__).with_name("aion-bluetooth-sms")
+    python = sys.executable or "/usr/bin/python3"
+    subprocess.run(["dbus-run-session", "--", python, str(client), mac], check=False)
 
 
 def bluetooth_menu():
     actions = {
         "1": pair_phone,
-        "2": connect_audio_device,
-        "3": manage_paired_device,
-        "4": select_audio,
+        "2": lambda: pair_phone(speakerphone=True),
+        "3": phone_sms,
+        "4": connect_audio_device,
+        "5": manage_paired_device,
+        "6": select_audio,
     }
     while True:
         heading(tr('Bluetooth', '藍牙'))
         row(1, tr('Play music from a phone', '從手機播放音樂'), tr('Phone → AION', '手機 → AION'))
-        row(2, tr('Connect headphones or a speaker', '連接耳機或喇叭'), tr('AION → Bluetooth audio', 'AION → 藍牙音訊'))
+        row(2, tr('Phone speakerphone', '手機免持通話'), tr('Phone ↔ Voice HAT', '手機 ↔ Voice HAT'))
+        row(3, tr('Phone SMS', '手機簡訊'))
+        row(4, tr('Connect headphones or a speaker', '連接耳機或喇叭'), tr('AION → Bluetooth audio', 'AION → 藍牙音訊'))
         print()
-        row(3, tr('Manage paired devices', '管理已配對裝置'))
-        row(4, tr('Audio output', '音訊輸出'))
+        row(5, tr('Manage paired devices', '管理已配對裝置'))
+        row(6, tr('Audio output', '音訊輸出'))
         print()
         row(0, tr('Back', '返回'))
 
@@ -268,7 +290,7 @@ def bluetooth_menu():
             pause()
 
         except (bt.BluetoothError, OSError) as exc:
-            print(f"tr('\nERROR: ', '\n錯誤：'){exc}")
+            print(tr('\nERROR: ', '\n錯誤：') + str(exc))
             pause()
 
         except (EOFError, KeyboardInterrupt):

@@ -12,7 +12,14 @@ RDEPENDS:${PN} = " \
     python3-core \
     python3-modules \
     python3-mutagen \
+    python3-gpiod \
+    python3-pillow \
+    python3-zoneinfo \
+    tzdata-core tzdata-misc \
+    tzdata-africa tzdata-americas tzdata-antarctica tzdata-arctic \
+    tzdata-asia tzdata-atlantic tzdata-australia tzdata-europe tzdata-pacific \
     mpv \
+    chafa \
     openssl-bin \
     aion-bluetooth \
 "
@@ -41,7 +48,8 @@ FILES:${PN} += "${bindir}/aion-player-console"
 FILES:${PN} += "${bindir}/aion-setup"
 FILES:${PN} += "${bindir}/aion-session"
 
-SRC_URI:append = " file://aion_ui.py file://aion_translations.py"
+SRC_URI:append = " file://aion_ui.py file://aion_translations.py file://aion_local_info.py file://aion_media_info.py file://aion_voice_button.py"
+SRC_URI:append = " file://aion_traffic_map.py"
 SRC_URI:append = " file://40-aion-journal.conf"
 SRC_URI:append = " file://aion-wifi-menu"
 
@@ -51,7 +59,12 @@ do_install:append() {
     install -d "${D}${sysconfdir}/systemd/journald.conf.d"
     install -m 0644 "${WORKDIR}/40-aion-journal.conf" "${D}${sysconfdir}/systemd/journald.conf.d/"
     install -m 0644 "${WORKDIR}/aion_ui.py" "${D}${bindir}/aion_ui.py"
+    install -m 0644 "${WORKDIR}/aion_local_info.py" "${D}${bindir}/aion_local_info.py"
+    install -m 0644 "${WORKDIR}/aion_media_info.py" "${D}${bindir}/aion_media_info.py"
+    install -m 0644 "${WORKDIR}/aion_voice_button.py" "${D}${bindir}/aion_voice_button.py"
+    install -m 0644 "${WORKDIR}/aion_traffic_map.py" "${D}${bindir}/aion_traffic_map.py"
     install -m 0644 "${WORKDIR}/aion_translations.py" "${D}${bindir}/aion_translations.py"
+    install -m 0755 "${WORKDIR}/aion-wifi-menu" "${D}${bindir}/aion-wifi-menu"
 }
 
 FILES:${PN}:append = " ${bindir}/aion-wifi-menu ${bindir}/aion-storage-menu ${sysconfdir}/systemd/journald.conf.d/40-aion-journal.conf"

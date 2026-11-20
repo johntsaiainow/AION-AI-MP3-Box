@@ -8,7 +8,6 @@ P3=/dev/mmcblk0p3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="$ROOT/build/tmp/deploy/images/raspberrypi3-64/core-image-aion-mp3-raspberrypi3-64.rootfs.ext4"
-BACKUP="$ROOT/backups/20261117-144643"
 
 EXPECTED_P2_SIZE=790626304
 IMAGE_SIZE=0
@@ -59,12 +58,6 @@ IMAGE_SIZE="$(stat -Lc %s "$IMAGE")"
     exit 1
 }
 
-# Verify backups
-(
-    cd "$BACKUP"
-    sha256sum -c SHA256SUMS
-)
-
 # Do not write to mounted partitions
 for PART in "$P1" "$P2" "$P3"; do
     if findmnt -rn -S "$PART" >/dev/null; then
@@ -99,12 +92,77 @@ echo "P1 Boot and P3 Music will not be written."
 read -r -p 'Type FLASH-AION-P2 to continue: ' CONFIRM
 [[ "$CONFIRM" == "FLASH-AION-P2" ]] || exit 1
 
+umask 077
+mkdir -p "$ROOT/backups"
+BACKUP="$(mktemp -d "$ROOT/backups/p2-before-flash.XXXXXXXX")"
+STAGING="$(mktemp -d)"
+OLD_MOUNT="$STAGING/old"
+NEW_MOUNT="$STAGING/new"
+STAGED_IMAGE="$STAGING/rootfs.ext4"
+mkdir "$OLD_MOUNT" "$NEW_MOUNT"
+cleanup() {
+    if mountpoint -q "$NEW_MOUNT"; then sudo umount "$NEW_MOUNT" || return; fi
+    if mountpoint -q "$OLD_MOUNT"; then sudo umount "$OLD_MOUNT" || return; fi
+    rm -f -- "$STAGED_IMAGE" "$STAGING/previous.ext4"
+    rmdir -- "$OLD_MOUNT" "$NEW_MOUNT" "$STAGING"
+}
+trap cleanup EXIT
+
+echo "Backing up current P2 to $BACKUP"
+sudo sfdisk --dump "$DEVICE" > "$BACKUP/partition-table.sfdisk"
+sudo install -m 0600 /dev/null "$BACKUP/rootfs.ext4"
+sudo dd if="$P2" of="$BACKUP/rootfs.ext4" bs=4M iflag=fullblock conv=fsync status=none
+sudo cmp -s "$P2" "$BACKUP/rootfs.ext4"
+# Mount with normal recovery so a pending ext4 journal is replayed on a
+# disposable copy rather than skipped or applied to the verified backup.
+sudo cp --reflink=auto --sparse=always "$BACKUP/rootfs.ext4" "$STAGING/previous.ext4"
+cp --reflink=auto --sparse=always "$IMAGE" "$STAGED_IMAGE"
+sudo mount -o loop,rw,nodev,nosuid,noexec "$STAGING/previous.ext4" "$OLD_MOUNT"
+sudo mount -o loop,rw,nodev,nosuid,noexec "$STAGED_IMAGE" "$NEW_MOUNT"
+
+sudo bash -euo pipefail -s -- "$OLD_MOUNT" "$NEW_MOUNT" <<'PRESERVE_SETTINGS'
+previous=$1
+next=$2
+paths=(var/lib/aion-audio etc/aiy-box-rebirth etc/NetworkManager/system-connections
+       var/lib/NetworkManager var/lib/bluetooth etc/machine-id var/lib/systemd/timesync root/.ssh)
+shopt -s nullglob
+for key in "$previous"/etc/ssh/ssh_host_*; do
+    paths+=("${key#"$previous/"}")
+done
+for path in "${paths[@]}"; do
+    [[ -e "$previous/$path" || -L "$previous/$path" ]] || continue
+    (cd "$previous" && cp -a --parents -- "$path" "$next")
+    while IFS= read -r -d '' file; do
+        target="$next/${file#"$previous/"}"
+        cmp -s "$file" "$target"
+        [[ $(stat -c '%u:%g:%a' "$file") == "$(stat -c '%u:%g:%a' "$target")" ]]
+    done < <(find "$previous/$path" -type f -print0)
+done
+for path in var/lib/aion-audio/config.json etc/aiy-box-rebirth/tomtom.key; do
+    if [[ -f "$previous/$path" ]]; then
+        cmp -s "$previous/$path" "$next/$path"
+        printf 'Verified saved settings file: %s\n' "$path"
+    fi
+done
+PRESERVE_SETTINGS
+
+sudo umount "$NEW_MOUNT"
+sudo umount "$OLD_MOUNT"
+sudo tune2fs -U "$(sudo blkid -s UUID -o value "$P2")" "$STAGED_IMAGE" >/dev/null
+e2fsck -fn "$STAGED_IMAGE"
+for PART in "$P1" "$P2" "$P3"; do
+    if findmnt -rn -S "$PART" >/dev/null; then
+        echo "ERROR: $PART became mounted during staging"
+        exit 1
+    fi
+done
+sudo cmp -s "$P2" "$BACKUP/rootfs.ext4"
+
 echo
 echo "=== FLASH P2 ONLY ==="
-sudo dd if="$IMAGE" of="$P2" \
+sudo dd if="$STAGED_IMAGE" of="$P2" \
     bs=4M status=progress conv=fsync
-
-sync
+sudo cmp -s -n "$IMAGE_SIZE" "$STAGED_IMAGE" "$P2"
 
 echo
 echo "=== CHECK NEW ROOTFS ==="
